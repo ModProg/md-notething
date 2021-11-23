@@ -19,7 +19,7 @@ ignore = []
 
 [serve]
 # The port to serve on.
-port = 8080
+port = 3000
 # Open a browser tab once the initial build is complete.
 open = false
 

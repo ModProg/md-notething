@@ -12,5 +12,10 @@ incremental = false
 opt-level = "s"
 
 [dependencies]
-yew = {git = "https://github.com/yewstack/yew", branch = "master"}
-yew-router = { git = "https://github.com/yewstack/yew", branch="master" }
+gloo-console = "0.2.0"
+js-sys = "0.3.55"
+web-sys = { version = "0.3.55", features = ["CssStyleDeclaration","DocumentFragment", "Range", "Node", "DomRect", "NodeList"] }
+
+[dependencies.yew]
+version = "0.18.0"
+# git = "https://github.com/yewstack/yew.git"
