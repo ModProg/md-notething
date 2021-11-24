@@ -66,12 +66,21 @@ enum TextStyle {
 }
 
 impl TextStyle {
-    fn as_class(&self) -> &'static [&'static str] {
+    fn forground_classes(&self) -> &'static [&'static str] {
         match self {
             TextStyle::Italic => &["italic"],
             TextStyle::Bold => &["font-bold"],
-            TextStyle::Code => &["bg-gray-600" /*, "rounded"*/],
-            TextStyle::Cursor => &["text-gray-900"],
+            TextStyle::Cursor => &["text-gray-900", "rounded", "bg-red-300"],
+            _ => &[],
+        }
+    }
+    fn background_classes(&self) -> &'static [&'static str] {
+        match self {
+            // These are mirrored to help with non monospace spacing
+            TextStyle::Italic => &["italic"],
+            TextStyle::Bold => &["font-bold"],
+            TextStyle::Code => &["bg-gray-600"],
+            _ => &[],
         }
     }
 }
@@ -97,7 +106,7 @@ impl Model {
             key if key == "k" => Msg::CursorMove(0, -1),
             key if key == "l" => Msg::CursorMove(1, 0),
             a => {
-                log!(a.key);
+                log!("Unknown keypress", a.key);
                 return None;
             }
         })
@@ -227,12 +236,17 @@ impl Component for Model {
         html! {
             <div class=classes!("dark") style="font-family: Hack, monospace; font-size: 20px" >
                 <div ref=self.node_ref.clone() class=classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "h-screen") onkeypress=keyhandler /*onfocus={self.link.callback(|_| Msg::Update)}*/ tabindex="0">
-                    <div class=classes!("absolute", "z-10") id="body">
+                    <div class=classes!("absolute", "text-transparent") id="body">
                         {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref))| html!{
-                            <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=self.highlighting.clone() cursor=(i==self.cursor_position.1).then(|| self.cursor_position.0)/>
+                            <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=self.highlighting.clone() background=true cursor=None/>
                         })}
                     </div>
-                    <Cursor x={self.cursor_position.0} y={self.cursor_position.1} style=CursorStyle::Box lines=self.line_refs.clone() text=self.text.lines().map(String::from).collect::<Vec<_>>()/>
+                    <div class=classes!("absolute", "z-10") id="body">
+                        {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref))| html!{
+                            <Line line=line.clone()+" " offset=*offset ref=node_ref.clone() highlighting=self.highlighting.clone() cursor=(i==self.cursor_position.1).then(|| self.cursor_position.0)/>
+                        })}
+                    </div>
+                    // <Cursor x={self.cursor_position.0} y={self.cursor_position.1} style=CursorStyle::Box lines=self.line_refs.clone() text=self.text.lines().map(String::from).collect::<Vec<_>>()/>
                     // <p id="body"><span>{"This "}</span> <span class=classes!("italic")>{
                     //     {"_is just a random text_"}
                     // }</span> </p>
@@ -251,7 +265,10 @@ struct LineProps {
     line: String,
     highlighting: Vec<(TextStyle, Range<usize>)>,
     offset: usize,
+    #[prop_or_default]
     cursor: Option<usize>,
+    #[prop_or_default]
+    background: bool,
 }
 
 struct Line(LineProps);
@@ -268,11 +285,13 @@ impl Component for Line {
         false
     }
 
-    fn change(&mut self, _props: Self::Properties) -> ShouldRender {
-        // Should only return "true" if new properties are different to
-        // previously received properties.
-        // This component has no properties so we will always return "false".
-        false
+    fn change(&mut self, props: Self::Properties) -> ShouldRender {
+        if props != self.0 {
+            self.0 = props;
+            true
+        } else {
+            false
+        }
     }
 
     fn view(&self) -> Html {
@@ -302,48 +321,68 @@ impl Component for Line {
             .0
             .line
             .grapheme_indices(true)
-            .map(|(idx, grapheme)| {
+            .enumerate()
+            .map(|(idx, (grapheme_offset, grapheme))| {
                 let classes: HashSet<_> = self
                     .0
                     .highlighting
                     .iter()
                     .filter_map(|(hi, range)| {
-                        if range.start <= idx + self.0.offset && range.end > idx + self.0.offset {
+                        if range.start <= grapheme_offset + self.0.offset
+                            && range.end > grapheme_offset + self.0.offset
+                        {
                             Some(hi)
                         } else {
                             None
                         }
                     })
-                    // .flatten()
                     .copied()
+                    .chain((Some(idx) == self.0.cursor).then(|| TextStyle::Cursor))
+                    // .flatten()
                     .collect();
                 (classes, grapheme)
             })
             .peekable();
 
-        let mut was_code = false;
-        while let (Some((highlights, grapheme)), will_code) = (
-            idk.next(),
-            idk.peek()
-                .map(|(highlights, _)| highlights.contains(&TextStyle::Code)).unwrap_or_default(),
-        ) {
-            let mut classes: Vec<_> = highlights
-                .iter()
-                .map(TextStyle::as_class)
-                .flatten()
-                .copied()
-                .collect();
-            if !will_code{
-                classes.push("rounded-r")
-            }
-            if !was_code{
-                classes.push("rounded-l")
-            }
-            was_code = highlights.contains(&TextStyle::Code);
+        if self.0.background {
+            let mut was_code = false;
+            while let (Some((highlights, grapheme)), will_code) = (
+                idk.next(),
+                idk.peek()
+                    .map(|(highlights, _)| highlights.contains(&TextStyle::Code))
+                    .unwrap_or_default(),
+            ) {
+                let mut classes: Vec<_> = highlights
+                    .iter()
+                    .map(TextStyle::background_classes)
+                    .flatten()
+                    .copied()
+                    .collect();
+                if !will_code {
+                    classes.push("rounded-r")
+                }
+                if !was_code {
+                    classes.push("rounded-l")
+                }
+                was_code = highlights.contains(&TextStyle::Code);
 
-            spans.push(html! {
-                <span class=classes!(classes)>{grapheme}</span>
-            });
+                spans.push(html! {
+                    <span class=classes!(classes)>{grapheme}</span>
+                });
+            }
+        } else {
+            for (highlights, grapheme) in idk {
+                let mut classes: Vec<_> = highlights
+                    .iter()
+                    .map(TextStyle::forground_classes)
+                    .flatten()
+                    .copied()
+                    .collect();
+
+                spans.push(html! {
+                    <span class=classes!(classes)>{grapheme}</span>
+                });
+            }
         }
 
         // while let (Some((hi, range)), peek) = (his.next(), his.peek()) {
