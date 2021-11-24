@@ -95,7 +95,7 @@ struct Model {
     line_lengths: Vec<usize>,
     line_refs: Vec<NodeRef>,
     highlighting: Vec<(TextStyle, Range<usize>)>,
-    lines: Vec<(String, usize, NodeRef)>,
+    lines: Vec<(String, usize, NodeRef, Vec<(TextStyle, Range<usize>)>)>,
 }
 
 impl Model {
@@ -112,6 +112,7 @@ impl Model {
         })
     }
     fn parse_md(&mut self) {
+        log!("hi");
         let parser = Parser::new(&self.text);
 
         // let mut highlights: HashSet<TextStyle> = HashSet::new();
@@ -171,7 +172,15 @@ impl Model {
                 let node_ref = NodeRef::default();
                 line_refs.push(node_ref.clone());
                 line_lengths.push(UnicodeSegmentation::graphemes(l, true).count());
-                let ret = (l.to_owned(), offset, node_ref);
+                let ret = (
+                    l.to_owned(),
+                    offset,
+                    node_ref,
+                    self.highlighting
+                        .iter()
+                        .filter(|(_, range)| range.end > offset && range.start < offset + l.len())
+                        .cloned().collect()
+                );
                 offset += l.len() + 1;
                 ret
             })
@@ -189,7 +198,7 @@ impl Component for Model {
         let mut s = Self {
             link,
             cursor_position: (0, 0, 0),
-            text: "This: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a".repeat(100),
+            text: "This: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a".repeat(5),
             node_ref: NodeRef::default(),
             line_lengths: vec![],
             line_refs: vec![],
@@ -232,16 +241,20 @@ impl Component for Model {
 
         // let
         html! {
-            <div class=classes!("dark") style="font-family: Hack, monospace; font-size: 20px" >
+            <div class=classes!("dark") style="font-family: Hack, monospace; font-size: 20px; line-height: 30px" >
                 <div ref=self.node_ref.clone() style="min-height:100vh" class=classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap") onkeypress=keyhandler /*onfocus={self.link.callback(|_| Msg::Update)}*/ tabindex="0">
-                    <div style="height:0" class=classes!("text-transparent") id="body">
-                        {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref))| html!{
-                            <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=self.highlighting.iter().filter(|(_, range)| range.start < *offset).cloned().collect::<Vec<_>>() background=true cursor=None/>
+                    <div style="height:0" class=classes!("text-transparent")>
+                        {for self.lines.iter().map(|(line,offset, node_ref, highlighting)| html!{
+                            <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=highlighting.clone()
+                                // .iter()
+                                // .filter(|(_, range)| range.end > *offset && range.start < *offset + line.len()).cloned()
+                                // .collect::<Vec<_>>() 
+                                background=true cursor=None/>
                         })}
                     </div>
-                    <div class=classes!("z-10") id="body">
-                        {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref))| html!{
-                            <Line line=line.clone()+" " offset=*offset ref=node_ref.clone() highlighting=self.highlighting.clone() cursor=(i==self.cursor_position.1).then(|| self.cursor_position.0)/>
+                    <div>
+                        {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref, highlighting))| html!{
+                            <Line line=line.clone()+" " offset=*offset ref=node_ref.clone() highlighting=highlighting.clone() cursor=(i==self.cursor_position.1).then(|| self.cursor_position.0)/>
                         })}
                     </div>
                 </div>
@@ -280,6 +293,7 @@ impl Component for Line {
             self.0 = props;
             true
         } else {
+            // log!("hi");
             false
         }
     }
