@@ -189,9 +189,7 @@ impl Component for Model {
         let mut s = Self {
             link,
             cursor_position: (0, 0, 0),
-            text: String::from(
-                "This: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph",
-            ),
+            text: "This: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a".repeat(100),
             node_ref: NodeRef::default(),
             line_lengths: vec![],
             line_refs: vec![],
@@ -235,25 +233,17 @@ impl Component for Model {
         // let
         html! {
             <div class=classes!("dark") style="font-family: Hack, monospace; font-size: 20px" >
-                <div ref=self.node_ref.clone() class=classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "h-screen") onkeypress=keyhandler /*onfocus={self.link.callback(|_| Msg::Update)}*/ tabindex="0">
-                    <div class=classes!("absolute", "text-transparent") id="body">
+                <div ref=self.node_ref.clone() style="min-height:100vh" class=classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap") onkeypress=keyhandler /*onfocus={self.link.callback(|_| Msg::Update)}*/ tabindex="0">
+                    <div style="height:0" class=classes!("text-transparent") id="body">
                         {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref))| html!{
-                            <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=self.highlighting.clone() background=true cursor=None/>
+                            <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=self.highlighting.iter().filter(|(_, range)| range.start < *offset).cloned().collect::<Vec<_>>() background=true cursor=None/>
                         })}
                     </div>
-                    <div class=classes!("absolute", "z-10") id="body">
+                    <div class=classes!("z-10") id="body">
                         {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref))| html!{
                             <Line line=line.clone()+" " offset=*offset ref=node_ref.clone() highlighting=self.highlighting.clone() cursor=(i==self.cursor_position.1).then(|| self.cursor_position.0)/>
                         })}
                     </div>
-                    // <Cursor x={self.cursor_position.0} y={self.cursor_position.1} style=CursorStyle::Box lines=self.line_refs.clone() text=self.text.lines().map(String::from).collect::<Vec<_>>()/>
-                    // <p id="body"><span>{"This "}</span> <span class=classes!("italic")>{
-                    //     {"_is just a random text_"}
-                    // }</span> </p>
-                    // <div class=classes!("bg-red-300") style ={
-                    //     document().create_range().unwrap();
-                    //     ""
-                    // }></div>
                 </div>
             </div>
         }
