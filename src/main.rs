@@ -1,10 +1,13 @@
 use std::{
     collections::HashSet,
+    iter,
     ops::{BitOr, Range},
 };
 
 use gloo_console::log;
 use pulldown_cmark::{Parser, Tag};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use web_sys::{Element, HtmlInputElement, Node};
 use yew::{prelude::*, utils::document};
 
@@ -67,8 +70,8 @@ impl TextStyle {
         match self {
             TextStyle::Italic => &["italic"],
             TextStyle::Bold => &["font-bold"],
-            TextStyle::Code => &["bg-gray-600", "rounded"],
-            TextStyle::Cursor => todo!(),
+            TextStyle::Code => &["bg-gray-600" /*, "rounded"*/],
+            TextStyle::Cursor => &["text-gray-900"],
         }
     }
 }
@@ -82,7 +85,7 @@ struct Model {
     node_ref: NodeRef,
     line_lengths: Vec<usize>,
     line_refs: Vec<NodeRef>,
-    highlighting: Vec<(HashSet<TextStyle>, Range<usize>)>,
+    highlighting: Vec<(TextStyle, Range<usize>)>,
     lines: Vec<(String, usize, NodeRef)>,
 }
 
@@ -102,38 +105,44 @@ impl Model {
     fn parse_md(&mut self) {
         let parser = Parser::new(&self.text);
 
-        let mut highlights: HashSet<TextStyle> = HashSet::new();
+        // let mut highlights: HashSet<TextStyle> = HashSet::new();
 
         self.highlighting = parser
             .into_offset_iter()
             .filter_map(|(elem, range)| {
                 use pulldown_cmark::Event;
-                if match elem {
-                    Event::Start(Tag::Emphasis) => {
-                        highlights.insert(TextStyle::Italic);
-                        true
-                    }
-                    Event::Start(Tag::Strong) => {
-                        highlights.insert(TextStyle::Bold);
-                        true
-                    }
+                Some((
+                    match elem {
+                        Event::Start(Tag::Emphasis) => {
+                            TextStyle::Italic
+                            // highlights.insert(TextStyle::Italic);
+                            // true
+                        }
+                        Event::Start(Tag::Strong) => {
+                            TextStyle::Bold
+                            // highlights.insert(TextStyle::Bold);
+                            // true
+                        }
 
-                    Event::End(Tag::Emphasis) => {
-                        highlights.remove(&TextStyle::Italic);
-                        false
-                    }
-                    Event::End(Tag::Strong) => {
-                        highlights.remove(&TextStyle::Bold);
-                        false
-                    }
-
-                    Event::Code(_) => return Some((HashSet::from([TextStyle::Code]), range)),
-                    _ => false,
-                } {
-                    Some((highlights.clone(), range))
-                } else {
-                    None
-                }
+                        // Event::End(Tag::Emphasis) => {
+                        //     highlights.remove(&TextStyle::Italic);
+                        //     false
+                        // }
+                        // Event::End(Tag::Strong) => {
+                        //     highlights.remove(&TextStyle::Bold);
+                        //     false
+                        // }
+                        Event::Code(_) => TextStyle::Code,
+                        // return Some((HashSet::from([TextStyle::Code]), range)),
+                        _ => return None,
+                    },
+                    range,
+                ))
+                // {
+                //     Some((highlights.clone(), range))
+                // } else {
+                //     None
+                // }
             })
             .collect();
 
@@ -152,7 +161,7 @@ impl Model {
             .map(|l| {
                 let node_ref = NodeRef::default();
                 line_refs.push(node_ref.clone());
-                line_lengths.push(l.len());
+                line_lengths.push(UnicodeSegmentation::graphemes(l, true).count());
                 let ret = (l.to_owned(), offset, node_ref);
                 offset += l.len() + 1;
                 ret
@@ -172,7 +181,7 @@ impl Component for Model {
             link,
             cursor_position: (0, 0, 0),
             text: String::from(
-                "This: _is some pretty **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragraph",
+                "This: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph",
             ),
             node_ref: NodeRef::default(),
             line_lengths: vec![],
@@ -190,7 +199,7 @@ impl Component for Model {
                 self.cursor_position.1 = ((self.cursor_position.1 as i32 + y).max(0) as usize)
                     .min(self.line_lengths.len() - 1);
                 self.cursor_position.0 = ((self.cursor_position.0 as i32 + x).max(0) as usize)
-                    .min(self.line_lengths[self.cursor_position.1].max(1) - 1);
+                    .min(self.line_lengths[self.cursor_position.1]);
                 // TODO This could be more precise
                 true
             }
@@ -218,12 +227,12 @@ impl Component for Model {
         html! {
             <div class=classes!("dark") style="font-family: Hack, monospace; font-size: 20px" >
                 <div ref=self.node_ref.clone() class=classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "h-screen") onkeypress=keyhandler /*onfocus={self.link.callback(|_| Msg::Update)}*/ tabindex="0">
-                    <div class=classes!("mix-blend-difference", "absolute", "z-10") id="body">
-                        {for self.lines.iter().map(|(line,offset, node_ref)| html!{
-                            <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=self.highlighting.clone()/>
+                    <div class=classes!("absolute", "z-10") id="body">
+                        {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref))| html!{
+                            <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=self.highlighting.clone() cursor=(i==self.cursor_position.1).then(|| self.cursor_position.0)/>
                         })}
                     </div>
-                    <Cursor x={self.cursor_position.0} y={self.cursor_position.1} style=CursorStyle::Box lines=self.line_refs.clone()/>
+                    <Cursor x={self.cursor_position.0} y={self.cursor_position.1} style=CursorStyle::Box lines=self.line_refs.clone() text=self.text.lines().map(String::from).collect::<Vec<_>>()/>
                     // <p id="body"><span>{"This "}</span> <span class=classes!("italic")>{
                     //     {"_is just a random text_"}
                     // }</span> </p>
@@ -240,8 +249,9 @@ impl Component for Model {
 #[derive(Properties, Clone, PartialEq)]
 struct LineProps {
     line: String,
-    highlighting: Vec<(HashSet<TextStyle>, Range<usize>)>,
+    highlighting: Vec<(TextStyle, Range<usize>)>,
     offset: usize,
+    cursor: Option<usize>,
 }
 
 struct Line(LineProps);
@@ -267,49 +277,95 @@ impl Component for Line {
 
     fn view(&self) -> Html {
         let mut spans = vec![];
-        if self.0.line.is_empty() {
-            spans.push(html!(<span>{" "}</span>));
-        } else {
-            let mut his = self
-                .0
-                .highlighting
+        // let mut his = self
+        //     .0
+        //     .highlighting
+        //     .iter()
+        //     .filter_map(|(h, r)| {
+        //         if r.end > self.0.offset && r.start < self.0.offset + self.0.line.len() {
+        //             let mut r = r.clone();
+        //             r.end = (r.end as i32 - self.0.offset as i32).min(self.0.line.len() as i32)
+        //                 as usize;
+        //             r.start = (r.start as i32 - self.0.offset as i32).max(0) as usize;
+        //             Some((h, r))
+        //         } else {
+        //             None
+        //         }
+        //     })
+        //     .peekable();
+        // if his.peek().is_none() {
+        //     spans.push(html!(<span>{&self.0.line}</span>));
+        // }
+        // /
+
+        let mut idk = self
+            .0
+            .line
+            .grapheme_indices(true)
+            .map(|(idx, grapheme)| {
+                let classes: HashSet<_> = self
+                    .0
+                    .highlighting
+                    .iter()
+                    .filter_map(|(hi, range)| {
+                        if range.start <= idx + self.0.offset && range.end > idx + self.0.offset {
+                            Some(hi)
+                        } else {
+                            None
+                        }
+                    })
+                    // .flatten()
+                    .copied()
+                    .collect();
+                (classes, grapheme)
+            })
+            .peekable();
+
+        let mut was_code = false;
+        while let (Some((highlights, grapheme)), will_code) = (
+            idk.next(),
+            idk.peek()
+                .map(|(highlights, _)| highlights.contains(&TextStyle::Code)).unwrap_or_default(),
+        ) {
+            let mut classes: Vec<_> = highlights
                 .iter()
-                .filter_map(|(h, r)| {
-                    if r.end > self.0.offset && r.start < self.0.offset + self.0.line.len() {
-                        let mut r = r.clone();
-                        r.end = (r.end as i32 - self.0.offset as i32).min(self.0.line.len() as i32)
-                            as usize;
-                        r.start = (r.start as i32 - self.0.offset as i32).max(0) as usize;
-                        Some((h, r))
-                    } else {
-                        None
-                    }
-                })
-                .peekable();
-            if his.peek().is_none() {
-                spans.push(html!(<span>{&self.0.line}</span>));
+                .map(TextStyle::as_class)
+                .flatten()
+                .copied()
+                .collect();
+            if !will_code{
+                classes.push("rounded-r")
             }
-            let mut shown_idx = 0;
-            while let (Some((hi, range)), peek) = (his.next(), his.peek()) {
-                if range.start > shown_idx {
-                    spans.push(html!(<span>{&self.0.line[shown_idx..range.start]}</span>));
-                }
-                let end = if let Some((_, peek_range)) = peek {
-                    peek_range.start.min(range.end)
-                } else {
-                    range.end
-                };
-                spans.push(html! {
-                    <span class=classes!(hi.iter().map(TextStyle::as_class).flatten().copied().collect::<Vec<&str>>())>
-                        {&self.0.line[range.start..end]}
-                    </span>
-                });
-                shown_idx = end - 1;
+            if !was_code{
+                classes.push("rounded-l")
             }
-        };
+            was_code = highlights.contains(&TextStyle::Code);
+
+            spans.push(html! {
+                <span class=classes!(classes)>{grapheme}</span>
+            });
+        }
+
+        // while let (Some((hi, range)), peek) = (his.next(), his.peek()) {
+        //     if range.start > shown_idx {
+        //         spans.push(html!(<span>{&self.0.line[shown_idx..range.start]}</span>));
+        //     }
+        //     let end = if let Some((_, peek_range)) = peek {
+        //         peek_range.start.min(range.end)
+        //     } else {
+        //         range.end
+        //     };
+        //     spans.push(html! {
+        //             <span class=classes!(hi.iter().map(TextStyle::as_class).flatten().copied().collect::<Vec<&str>>())>
+        //                 {&self.0.line[range.start..end]}
+        //             </span>
+        //         });
+        //     shown_idx = end;
+
         html! {
             <p>
                 {for spans}
+                <span>{" "}</span>
             </p>
         }
     }
@@ -321,6 +377,7 @@ struct CursorProps {
     y: usize,
     style: CursorStyle,
     lines: Vec<NodeRef>,
+    text: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -361,34 +418,66 @@ impl Component for Cursor {
 
     fn view(&self) -> Html {
         // Do something after the one second timeout is up!
-        let range: web_sys::Range = document().create_range().unwrap();
-        let line = self.props.lines[self.props.y as usize]
-            .cast::<Element>()
-            .unwrap();
-        // let body = body.child_nodes().item(0).unwrap();
-        let mut x = self.props.x;
-        let mut rect = None;
+        let line = self.props.lines[self.props.y].cast::<Element>().unwrap();
         let text_nodes = line.child_nodes();
-        let mut class = "";
-        let mut content = None;
-        for i in 0..text_nodes.length() {
-            let text_node: Node = text_nodes.get(i).unwrap();
-            let text_node = text_node.child_nodes().item(0).unwrap();
-            if range.set_start(&text_node, x as u32).is_ok()
-                && range.set_end(&text_node, x as u32 + 1).is_ok()
-            {
-                rect = Some(range.get_bounding_client_rect());
-                let elem = text_node.parent_element().unwrap();
-                if elem.class_list().contains("italic") {
-                    class = "italic";
+        if text_nodes.get(0).is_some() {
+            let range: web_sys::Range = document().create_range().unwrap();
+            let text = &self.props.text[self.props.y];
+            // let body = body.child_nodes().item(0).unwrap();
+            let mut rect = None;
+
+            let mut graphemes = UnicodeSegmentation::graphemes(text.as_str(), true)
+                .chain(iter::once(" "))
+                .take(self.props.x + 1)
+                .peekable();
+
+            let mut text_node_idx = 0;
+            let mut inner_idx = 0;
+
+            log!(self.props.x);
+            while let Some(&grapheme) = graphemes.peek() {
+                log!(grapheme, grapheme.len());
+                let text_node: Node = text_nodes.get(text_node_idx).unwrap();
+                let text_node = text_node.child_nodes().item(0).unwrap();
+
+                let grapheme_width = grapheme.width();
+                let grapheme_width = if grapheme_width == 3 {
+                    6
+                } else {
+                    grapheme_width
+                };
+
+                if range.set_start(&text_node, inner_idx as u32).is_ok()
+                    && range
+                        .set_end(&text_node, (inner_idx + grapheme_width) as u32)
+                        .is_ok()
+                {
+                    rect = Some(range.get_bounding_client_rect());
+                    inner_idx += grapheme_width;
+                    graphemes.next();
+                } else {
+                    text_node_idx += 1;
+                    inner_idx = 0;
                 }
-                content = Some(range.clone_contents().unwrap().text_content().unwrap());
-                break;
             }
-            x -= text_node.text_content().unwrap().len();
-        }
-        if let Some(rect) = rect {
-            let content = content.unwrap();
+
+            // for i in 0..text_nodes.length() {
+            //     let text_node: Node = text_nodes.get(i).unwrap();
+            //     let text_node = text_node.child_nodes().item(0).unwrap();
+            //     loop {
+            //         if range.set_start(&text_node, x as u32).is_ok()
+            //             && range.set_end(&text_node, x as u32 + 1).is_ok()
+            //         {
+            //             rect = Some(range.get_bounding_client_rect());
+            //             content = Some(range.clone_contents().unwrap().text_content().unwrap());
+            //             break;
+            //         }
+            //     }
+            //     x -= UnicodeSegmentation::graphemes(text_node.text_content().unwrap().as_str(), true)
+            //         .count();
+            // }
+            let rect = rect.unwrap();
+            // let content = content.unwrap();
             let classes = match self.props.style {
                 CursorStyle::Box => vec!["bg-red-300", "text-gray-900", "rounded"],
                 CursorStyle::EmtyBox => vec![
