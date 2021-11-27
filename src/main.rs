@@ -1,8 +1,4 @@
-use std::{
-    collections::HashSet,
-    iter,
-    ops::{BitOr, Range},
-};
+use std::{collections::HashSet, io::Write, iter, ops::Range};
 
 use gloo_console::log;
 use pulldown_cmark::{Parser, Tag};
@@ -13,6 +9,8 @@ use yew::{prelude::*, utils::document};
 
 enum Msg {
     CursorMove(i32, i32),
+    Write(String),
+    Insert,
 }
 
 struct Keypress {
@@ -22,8 +20,8 @@ struct Keypress {
     shift: bool,
 }
 
-impl From<KeyboardEvent> for Keypress {
-    fn from(ke: web_sys::KeyboardEvent) -> Self {
+impl From<&KeyboardEvent> for Keypress {
+    fn from(ke: &KeyboardEvent) -> Self {
         Self {
             key: ke.key(),
             alt: ke.alt_key(),
@@ -96,11 +94,19 @@ struct Model {
     line_refs: Vec<NodeRef>,
     highlighting: Vec<(TextStyle, Range<usize>)>,
     lines: Vec<(String, usize, NodeRef, Vec<(TextStyle, Range<usize>)>)>,
+    normal: bool,
 }
 
 impl Model {
-    fn handle_key(event: KeyboardEvent) -> Option<<Model as Component>::Message> {
-        Some(match Keypress::from(event).as_ref() {
+    fn handle_key(event: KeyboardEvent, normal: bool) -> Option<<Model as Component>::Message> {
+        let ret = Some(match Keypress::from(&event).as_ref() {
+            KeyRef {
+                key,
+                ctrl: false,
+                alt: false,
+                ..
+            } if !normal => Msg::Write(key.to_string()),
+            key if key == "i" => Msg::Insert,
             key if key == "h" => Msg::CursorMove(-1, 0),
             key if key == "j" => Msg::CursorMove(0, 1),
             key if key == "k" => Msg::CursorMove(0, -1),
@@ -109,7 +115,9 @@ impl Model {
                 log!("Unknown keypress", a.key);
                 return None;
             }
-        })
+        });
+        event.prevent_default();
+        ret
     }
     fn parse_md(&mut self) {
         log!("hi");
@@ -179,7 +187,8 @@ impl Model {
                     self.highlighting
                         .iter()
                         .filter(|(_, range)| range.end > offset && range.start < offset + l.len())
-                        .cloned().collect()
+                        .cloned()
+                        .collect(),
                 );
                 offset += l.len() + 1;
                 ret
@@ -198,12 +207,14 @@ impl Component for Model {
         let mut s = Self {
             link,
             cursor_position: (0, 0, 0),
-            text: "This: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a".repeat(5),
+            // text: "Tasdasdasdhapi asdh aohd kajsdnb ojabdno **lasd** nasdlk n öoao nhoiadsfjh opiadfh oiash \n".repeat(500),
+            text: "This: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a".repeat(10),
             node_ref: NodeRef::default(),
             line_lengths: vec![],
             line_refs: vec![],
             lines: vec![],
             highlighting: vec![],
+            normal: true
         };
         s.parse_md();
         s
@@ -217,6 +228,17 @@ impl Component for Model {
                 self.cursor_position.0 = ((self.cursor_position.0 as i32 + x).max(0) as usize)
                     .min(self.line_lengths[self.cursor_position.1]);
                 // TODO This could be more precise
+                true
+            }
+            Msg::Write(text) => {
+                self.text.insert_str(self.cursor_position.2, &text);
+                self.cursor_position.2 += text.len();
+                self.cursor_position.0 += text.graphemes(true).count();
+                self.parse_md();
+                true
+            }
+            Msg::Insert => {
+                self.normal = false;
                 true
             }
         }
@@ -237,7 +259,10 @@ impl Component for Model {
     }
 
     fn view(&self) -> Html {
-        let keyhandler = self.link.batch_callback(Self::handle_key);
+        let normal = self.normal;
+        let keyhandler = self
+            .link
+            .batch_callback(move |e| Self::handle_key(e, normal));
 
         // let
         html! {
@@ -248,12 +273,13 @@ impl Component for Model {
                             <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=highlighting.clone()
                                 // .iter()
                                 // .filter(|(_, range)| range.end > *offset && range.start < *offset + line.len()).cloned()
-                                // .collect::<Vec<_>>() 
+                                // .collect::<Vec<_>>()
                                 background=true cursor=None/>
                         })}
                     </div>
                     <div>
                         {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref, highlighting))| html!{
+                            // <p>{line.clone()} </p>
                             <Line line=line.clone()+" " offset=*offset ref=node_ref.clone() highlighting=highlighting.clone() cursor=(i==self.cursor_position.1).then(|| self.cursor_position.0)/>
                         })}
                     </div>
