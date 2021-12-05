@@ -20,3 +20,15 @@ body {
   -ms-overflow-style: none;  /* IE and Edge */
   scrollbar-width: none;  /* Firefox */
 }
+
+.-ml-px-2{
+  margin-left: -2px;
+}
+
+.-mr-px-2{
+  margin-right: -2px;
+}
+
+.cursor-line{
+  box-shadow: 2px 0 0 rgb(252, 165, 165) inset;
+}

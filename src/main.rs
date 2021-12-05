@@ -1,16 +1,30 @@
-use std::{collections::HashSet, io::Write, iter, ops::Range};
+#![feature(derive_default_enum)]
+use std::{
+    collections::HashSet,
+    fmt::format,
+    iter::{self, FromIterator},
+    ops::{Deref, DerefMut},
+};
 
 use gloo_console::log;
 use pulldown_cmark::{Parser, Tag};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use web_sys::{Element, HtmlInputElement, Node};
-use yew::{prelude::*, utils::document};
+use uuid::Uuid;
+use web_sys::{window, Element, HtmlInputElement, Node};
+use yew::prelude::*;
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Mode {
+    Insert,
+    Normal,
+}
 
 enum Msg {
     CursorMove(i32, i32),
+    CursorPos(Option<usize>, Option<usize>),
     Write(String),
-    Insert,
+    Mode(Mode),
 }
 
 struct Keypress {
@@ -60,19 +74,19 @@ enum TextStyle {
     Italic,
     Bold,
     Code,
-    Cursor,
+    Cursor(CursorStyle),
 }
 
 impl TextStyle {
-    fn forground_classes(&self) -> &'static [&'static str] {
+    fn forground_classes(self) -> &'static [&'static str] {
         match self {
             TextStyle::Italic => &["italic"],
             TextStyle::Bold => &["font-bold"],
-            TextStyle::Cursor => &["text-gray-900", "rounded", "bg-red-300"],
+            TextStyle::Cursor(cursor_style) => cursor_style.classes(), //&["text-gray-900", "rounded", "bg-red-300"],
             _ => &[],
         }
     }
-    fn background_classes(&self) -> &'static [&'static str] {
+    fn background_classes(self) -> &'static [&'static str] {
         match self {
             // These are mirrored to help with non monospace spacing
             TextStyle::Italic => &["italic"],
@@ -83,79 +97,206 @@ impl TextStyle {
     }
 }
 
+struct TextLine {
+    // content: String,
+    key: uuid::Uuid,
+    characters: Vec<(String, HashSet<TextStyle>, usize)>,
+}
+
+impl TextLine {
+    fn len(&self) -> usize {
+        self.characters.len()
+    }
+    fn char_len(&self) -> usize {
+        self.characters.iter().map(|(s, ..)| s.len()).sum()
+    }
+
+    /// position must be in 0..=line.len()
+    fn insert(&mut self, position: usize, value: &str) -> (Vec<Msg>, Vec<TextLine>) {
+        let mut lines = value.split('\n');
+        let graphemes: Vec<_> = lines
+            .next()
+            .expect("There should be a first item")
+            .grapheme_indices(true)
+            .collect();
+        // self.characters.reserve(graphemes.len());
+        let start_offset = if position == 0 {
+            0
+        } else {
+            self.characters[position - 1].2 + self.characters[position - 1].0.len()
+        };
+        let remainder = self.characters.split_off(position);
+
+        self.characters.extend(
+            graphemes
+                .iter()
+                .map(|&(i, v)| (v.to_owned(), HashSet::new(), i + start_offset)),
+        );
+        let mut new_lines: Vec<_> = lines.map(TextLine::from).collect();
+        let mut move_action = vec![];
+
+        let last_line_len;
+        if !new_lines.is_empty() {
+            move_action.push(Msg::CursorMove(0, new_lines.len() as i32));
+            let last_line = new_lines.last_mut().unwrap();
+            move_action.push(Msg::CursorPos(Some(last_line.len()), None));
+            last_line_len = last_line.len();
+            &mut last_line.characters
+        } else {
+            move_action.push(Msg::CursorMove(graphemes.len() as i32, 0));
+            last_line_len = self.len();
+            &mut self.characters
+        }
+        .extend(
+            remainder
+                .into_iter()
+                .enumerate()
+                .map(|(i, (c, s, _))| (c, s, i + last_line_len)),
+        );
+
+        (move_action, new_lines)
+    }
+}
+
+impl<S: AsRef<str>> From<S> for TextLine {
+    fn from(s: S) -> Self {
+        Self {
+            key: Uuid::new_v4(),
+            characters: s
+                .as_ref()
+                .grapheme_indices(true)
+                .map(|(offset, value)| (value.to_owned(), HashSet::new(), offset))
+                .collect(),
+        }
+    }
+}
+
+impl<'a> FromIterator<&'a TextLine> for String {
+    fn from_iter<T: IntoIterator<Item = &'a TextLine>>(iter: T) -> Self {
+        iter.into_iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+impl ToString for TextLine {
+    fn to_string(&self) -> String {
+        self.characters
+            .iter()
+            .map(|(v, ..)| v.to_string())
+            .collect()
+    }
+}
+
+impl DerefMut for TextLine {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.characters
+    }
+}
+impl Deref for TextLine {
+    type Target = [(String, HashSet<TextStyle>, usize)];
+
+    fn deref(&self) -> &Self::Target {
+        &self.characters
+    }
+}
+
 struct Model {
     // `ComponentLink` is like a reference to a component.
     // It can be used to send messages to the component
-    link: ComponentLink<Self>,
-    text: String,
-    cursor_position: (usize, usize, usize),
+    /// x 0..=lines[y].len(), y in 0..lines.len()
+    cursor_position: (usize, usize),
     node_ref: NodeRef,
-    line_lengths: Vec<usize>,
-    line_refs: Vec<NodeRef>,
-    highlighting: Vec<(TextStyle, Range<usize>)>,
-    lines: Vec<(String, usize, NodeRef, Vec<(TextStyle, Range<usize>)>)>,
-    normal: bool,
+    // highlighting: Vec<(TextStyle, Range<usize>)>,
+    // lines: Vec<(String, usize, NodeRef, Vec<(TextStyle, Range<usize>)>)>,
+    lines: Vec<TextLine>,
+    mode: Mode,
 }
 
 impl Model {
-    fn handle_key(event: KeyboardEvent, normal: bool) -> Option<<Model as Component>::Message> {
-        let ret = Some(match Keypress::from(&event).as_ref() {
-            KeyRef {
-                key,
-                ctrl: false,
-                alt: false,
-                ..
-            } if !normal => Msg::Write(key.to_string()),
-            key if key == "i" => Msg::Insert,
-            key if key == "h" => Msg::CursorMove(-1, 0),
-            key if key == "j" => Msg::CursorMove(0, 1),
-            key if key == "k" => Msg::CursorMove(0, -1),
-            key if key == "l" => Msg::CursorMove(1, 0),
-            a => {
-                log!("Unknown keypress", a.key);
-                return None;
+    fn handle_key_press(event: KeyboardEvent, mode: Mode) -> Option<<Model as Component>::Message> {
+        let ret = Some({
+            let key = Keypress::from(&event);
+            match mode {
+                Mode::Insert => match key.as_ref() {
+                    key if key == "Escape" => vec![Msg::Mode(Mode::Normal)],
+                    key if key == "Enter" => vec![Msg::Write("\n".to_owned())],
+                    key if key == "ArrowLeft" => vec![Msg::CursorMove(-1, 0)],
+                    key if key == "ArrowDown" => vec![Msg::CursorMove(0, 1)],
+                    key if key == "ArrowUp" => vec![Msg::CursorMove(0, -1)],
+                    key if key == "ArrowRight" => vec![Msg::CursorMove(1, 0)],
+                    // blacklist correctly handled keys
+                    key if ["Shift"].contains(&key.key) => return None,
+                    key if key == "Backspace" => todo!(),
+                    KeyRef {
+                        key,
+                        ctrl: false,
+                        alt: false,
+                        ..
+                    } if mode == Mode::Insert => vec![Msg::Write(key.to_owned())],
+                    a => {
+                        log!("Unknown keypress", a.key);
+                        return None;
+                    }
+                },
+                Mode::Normal => match key.as_ref() {
+                    key if key == "i" => vec![Msg::Mode(Mode::Insert)],
+                    key if key == "h" => vec![Msg::CursorMove(-1, 0)],
+                    key if key == "j" => vec![Msg::CursorMove(0, 1)],
+                    key if key == "k" => vec![Msg::CursorMove(0, -1)],
+                    key if key == "l" => vec![Msg::CursorMove(1, 0)],
+                    a => {
+                        log!("Unknown keypress", a.key);
+                        return None;
+                    }
+                },
             }
         });
         event.prevent_default();
         ret
     }
     fn parse_md(&mut self) {
-        log!("hi");
-        let parser = Parser::new(&self.text);
+        let text = &self.lines.iter().collect::<String>();
+        let parser = Parser::new(text);
 
         // let mut highlights: HashSet<TextStyle> = HashSet::new();
 
-        self.highlighting = parser
+        let highlighting: Vec<_> = parser
             .into_offset_iter()
             .filter_map(|(elem, range)| {
                 use pulldown_cmark::Event;
-                Some((
-                    match elem {
-                        Event::Start(Tag::Emphasis) => {
-                            TextStyle::Italic
-                            // highlights.insert(TextStyle::Italic);
-                            // true
-                        }
-                        Event::Start(Tag::Strong) => {
-                            TextStyle::Bold
-                            // highlights.insert(TextStyle::Bold);
-                            // true
-                        }
+                Some({
+                    let a = (
+                        match elem {
+                            Event::Start(Tag::Emphasis) => {
+                                TextStyle::Italic
+                                // highlights.insert(TextStyle::Italic);
+                                // true
+                            }
+                            Event::Start(Tag::Strong) => {
+                                TextStyle::Bold
+                                // highlights.insert(TextStyle::Bold);
+                                // true
+                            }
 
-                        // Event::End(Tag::Emphasis) => {
-                        //     highlights.remove(&TextStyle::Italic);
-                        //     false
-                        // }
-                        // Event::End(Tag::Strong) => {
-                        //     highlights.remove(&TextStyle::Bold);
-                        //     false
-                        // }
-                        Event::Code(_) => TextStyle::Code,
-                        // return Some((HashSet::from([TextStyle::Code]), range)),
-                        _ => return None,
-                    },
-                    range,
-                ))
+                            // Event::End(Tag::Emphasis) => {
+                            //     highlights.remove(&TextStyle::Italic);
+                            //     false
+                            // }
+                            // Event::End(Tag::Strong) => {
+                            //     highlights.remove(&TextStyle::Bold);
+                            //     false
+                            // }
+                            Event::Code(_) => TextStyle::Code,
+                            // return Some((HashSet::from([TextStyle::Code]), range)),
+                            _ => return None,
+                        },
+                        range,
+                    );
+                    log!(format!("{:?}", a));
+                    a
+                })
                 // {
                 //     Some((highlights.clone(), range))
                 // } else {
@@ -164,123 +305,152 @@ impl Model {
             })
             .collect();
 
-        for i in 0..self.highlighting.len() - 1 {
-            // One highlighting group can only be fully inside another one
-            if self.highlighting[i].1.end > self.highlighting[i + 1].1.end {}
-        }
-
         let mut offset = 0;
-        let mut line_refs = vec![];
-        let mut line_lengths = vec![];
-        // TODO normalize input or handle \n\r
-        self.lines = self
-            .text
-            .lines()
-            .map(|l| {
-                let node_ref = NodeRef::default();
-                line_refs.push(node_ref.clone());
-                line_lengths.push(UnicodeSegmentation::graphemes(l, true).count());
-                let ret = (
-                    l.to_owned(),
-                    offset,
-                    node_ref,
-                    self.highlighting
-                        .iter()
-                        .filter(|(_, range)| range.end > offset && range.start < offset + l.len())
-                        .cloned()
-                        .collect(),
-                );
-                offset += l.len() + 1;
-                ret
-            })
-            .collect();
-        self.line_refs = line_refs;
-        self.line_lengths = line_lengths;
+        for line in self.lines.iter_mut() {
+            for character in line.iter_mut() {
+                character.1 = highlighting
+                    .iter()
+                    .filter_map(|(hi, range)| {
+                        if range.start <= character.2 + offset && range.end > character.2 + offset {
+                            Some(*hi)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            }
+            // +1 for linebreak
+            offset += line.char_len() + 1;
+        }
     }
 }
 
 impl Component for Model {
-    type Message = Msg;
+    type Message = Vec<Msg>;
     type Properties = ();
 
-    fn create(_props: Self::Properties, link: ComponentLink<Self>) -> Self {
+    fn create(_props: &yew::Context<Model>) -> Self {
         let mut s = Self {
-            link,
-            cursor_position: (0, 0, 0),
-            // text: "Tasdasdasdhapi asdh aohd kajsdnb ojabdno **lasd** nasdlk n öoao nhoiadsfjh opiadfh oiash \n".repeat(500),
-            text: "This: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a".repeat(10),
+            cursor_position: (0, 0),
             node_ref: NodeRef::default(),
-            line_lengths: vec![],
-            line_refs: vec![],
-            lines: vec![],
-            highlighting: vec![],
-            normal: true
+            lines: //"**aa**"
+                "T_a_ **a** his: _is some pretty ừn ự đ ở **Markdown**_ **xD**\nThis: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a"
+                .repeat(10)
+                .lines()
+                .map(|s| s.into())
+                .collect(),
+            mode: Mode::Normal,
         };
         s.parse_md();
         s
     }
 
-    fn update(&mut self, msg: Self::Message) -> ShouldRender {
-        match msg {
-            Msg::CursorMove(x, y) => {
-                self.cursor_position.1 = ((self.cursor_position.1 as i32 + y).max(0) as usize)
-                    .min(self.line_lengths.len() - 1);
-                self.cursor_position.0 = ((self.cursor_position.0 as i32 + x).max(0) as usize)
-                    .min(self.line_lengths[self.cursor_position.1]);
-                // TODO This could be more precise
-                true
-            }
-            Msg::Write(text) => {
-                self.text.insert_str(self.cursor_position.2, &text);
-                self.cursor_position.2 += text.len();
-                self.cursor_position.0 += text.graphemes(true).count();
-                self.parse_md();
-                true
-            }
-            Msg::Insert => {
-                self.normal = false;
-                true
+    fn update(&mut self, ctx: &Context<Self>, msgs: Self::Message) -> bool {
+        let mut ret = false;
+        for msg in msgs {
+            match msg {
+                Msg::CursorMove(x, y) => {
+                    let last = self.cursor_position;
+                    self.cursor_position.1 = ((self.cursor_position.1 as i32 + y).max(0) as usize)
+                        .min(self.lines.len() - 1);
+                    if x != 0 {
+                        let max_x = if self.mode == Mode::Insert {
+                            self.lines[self.cursor_position.1].len()
+                        } else {
+                            self.lines[self.cursor_position.1].len() - 1
+                        };
+                        self.cursor_position.0 = ((self.cursor_position.0.min(max_x) as i32 + x)
+                            .max(0) as usize)
+                            .min(max_x);
+                    }
+                    // TODO This could be more precise
+                    ret |= last != self.cursor_position;
+                }
+                Msg::Write(text) => {
+                    let line = &mut self.lines[self.cursor_position.1];
+                    let (cursor_movement, new_lines) =
+                        line.insert(self.cursor_position.0.min(line.len()), &text);
+                    // Maybe optimized
+                    let window = window().unwrap();
+                    let performance = window.performance().unwrap();
+                    let time = performance.now();
+                    for line in new_lines.into_iter().rev() {
+                        self.lines.insert(self.cursor_position.1 + 1, line);
+                    }
+                    let time = performance.now() - time;
+                    log!(format!("{:?}", time));
+                    self.update(ctx, cursor_movement);
+                    // self.cursor_position.0 += text.graphemes(true).count();
+                    self.parse_md();
+                    ret = true;
+                }
+                Msg::Mode(mode) => {
+                    if mode != self.mode {
+                        if self.mode == Mode::Insert {
+                            self.cursor_position.0 = self
+                                .cursor_position
+                                .0
+                                .min(self.lines[self.cursor_position.1].len() - 1);
+                        }
+                        self.mode = mode;
+                        ret = true;
+                    }
+                }
+                Msg::CursorPos(x, y) => {
+                    if let Some(x) = x {
+                        self.cursor_position.0 = x;
+                    }
+                    if let Some(y) = y {
+                        self.cursor_position.1 = y;
+                    }
+                }
             }
         }
+        ret
     }
 
-    fn change(&mut self, _props: Self::Properties) -> ShouldRender {
+    fn changed(&mut self, _props: &yew::Context<Model>) -> bool {
         // Should only return "true" if new properties are different to
         // previously received properties.
         // This component has no properties so we will always return "false".
         false
     }
 
-    fn rendered(&mut self, first_render: bool) {
+    fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         if first_render {
             let smth = self.node_ref.cast::<HtmlInputElement>().unwrap();
             smth.focus().unwrap();
         }
     }
 
-    fn view(&self) -> Html {
-        let normal = self.normal;
-        let keyhandler = self
-            .link
-            .batch_callback(move |e| Self::handle_key(e, normal));
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        let mode = self.mode;
+        let keypress = ctx
+            .link()
+            .batch_callback(move |e| Self::handle_key_press(e, mode));
 
         // let
         html! {
-            <div class=classes!("dark") style="font-family: Hack, monospace; font-size: 20px; line-height: 30px" >
-                <div ref=self.node_ref.clone() style="min-height:100vh" class=classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap") onkeypress=keyhandler /*onfocus={self.link.callback(|_| Msg::Update)}*/ tabindex="0">
-                    <div style="height:0" class=classes!("text-transparent")>
-                        {for self.lines.iter().map(|(line,offset, node_ref, highlighting)| html!{
-                            <Line line=line.clone() offset=*offset ref=node_ref.clone() highlighting=highlighting.clone()
-                                // .iter()
-                                // .filter(|(_, range)| range.end > *offset && range.start < *offset + line.len()).cloned()
-                                // .collect::<Vec<_>>()
-                                background=true cursor=None/>
+            <div class={classes!("dark")} style="font-family: Hack, monospace; font-size: 20px; line-height: 30px" >
+                <div ref={self.node_ref.clone()} style="min-height:100vh" class={classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap")} onkeydown={keypress} /*onfocus={self.link.callback(|_| Msg::Update)}*/ tabindex="0">
+                    <div style="height:0" class={classes!("text-transparent")}>
+                        {for self.lines.iter().map(|line| html!{
+                            <Line key={line.key.to_string()} line={line.characters.clone()} background=true cursor={None}/>
                         })}
                     </div>
                     <div>
-                        {for self.lines.iter().enumerate().map(|(i,(line,offset, node_ref, highlighting))| html!{
-                            // <p>{line.clone()} </p>
-                            <Line line=line.clone()+" " offset=*offset ref=node_ref.clone() highlighting=highlighting.clone() cursor=(i==self.cursor_position.1).then(|| self.cursor_position.0)/>
+                        {for self.lines.iter().enumerate().map(|(i, line)| html!{
+                            <Line key={line.key.to_string()} line={line.characters.clone()} cursor = {(i == self.cursor_position.1)
+                                .then(|| (self.cursor_position.0.min(if self.mode == Mode::Insert {
+                                    line.len()
+                                } else {
+                                    line.len().max(1) - 1
+                                }),if self.mode == Mode::Insert {
+                                    CursorStyle::Insert
+                                }else{
+                                    CursorStyle::Box
+                                }))}
+                            />
                         })}
                     </div>
                 </div>
@@ -289,13 +459,11 @@ impl Component for Model {
     }
 }
 
-#[derive(Properties, Clone, PartialEq)]
+#[derive(Properties, Clone, PartialEq, Debug)]
 struct LineProps {
-    line: String,
-    highlighting: Vec<(TextStyle, Range<usize>)>,
-    offset: usize,
+    line: Vec<(String, HashSet<TextStyle>, usize)>,
     #[prop_or_default]
-    cursor: Option<usize>,
+    cursor: Option<(usize, CursorStyle)>,
     #[prop_or_default]
     background: bool,
 }
@@ -306,130 +474,91 @@ impl Component for Line {
     type Message = ();
     type Properties = LineProps;
 
-    fn create(props: Self::Properties, _link: ComponentLink<Self>) -> Self {
-        Self(props)
+    fn create(ctx: &yew::Context<Line>) -> Self {
+        Self(ctx.props().to_owned())
     }
 
-    fn update(&mut self, _msg: Self::Message) -> ShouldRender {
-        false
-    }
-
-    fn change(&mut self, props: Self::Properties) -> ShouldRender {
-        if props != self.0 {
-            self.0 = props;
+    fn changed(&mut self, ctx: &Context<Self>) -> bool {
+        // ctx.props() != ctx.
+        // TODO
+        if ctx.props() != &self.0 {
+            // log!(format!("{:?}", self.0));
+            // log!(format!("{:?}", ctx.props()));
+            self.0 = ctx.props().to_owned();
             true
         } else {
-            // log!("hi");
             false
         }
     }
 
-    fn view(&self) -> Html {
+    fn view(&self, ctx: &Context<Self>) -> Html {
         let mut spans = vec![];
-        // let mut his = self
-        //     .0
-        //     .highlighting
-        //     .iter()
-        //     .filter_map(|(h, r)| {
-        //         if r.end > self.0.offset && r.start < self.0.offset + self.0.line.len() {
-        //             let mut r = r.clone();
-        //             r.end = (r.end as i32 - self.0.offset as i32).min(self.0.line.len() as i32)
-        //                 as usize;
-        //             r.start = (r.start as i32 - self.0.offset as i32).max(0) as usize;
-        //             Some((h, r))
-        //         } else {
-        //             None
-        //         }
-        //     })
-        //     .peekable();
-        // if his.peek().is_none() {
-        //     spans.push(html!(<span>{&self.0.line}</span>));
-        // }
-        // /
+        let props = ctx.props();
 
-        let mut idk = self
-            .0
-            .line
-            .grapheme_indices(true)
-            .enumerate()
-            .map(|(idx, (grapheme_offset, grapheme))| {
-                let classes: HashSet<_> = self
-                    .0
-                    .highlighting
-                    .iter()
-                    .filter_map(|(hi, range)| {
-                        if range.start <= grapheme_offset + self.0.offset
-                            && range.end > grapheme_offset + self.0.offset
-                        {
-                            Some(hi)
-                        } else {
-                            None
-                        }
-                    })
-                    .copied()
-                    .chain((Some(idx) == self.0.cursor).then(|| TextStyle::Cursor))
-                    // .flatten()
-                    .collect();
-                (classes, grapheme)
-            })
-            .peekable();
-
-        if self.0.background {
+        if props.background {
             let mut was_code = false;
-            while let (Some((highlights, grapheme)), will_code) = (
-                idk.next(),
-                idk.peek()
-                    .map(|(highlights, _)| highlights.contains(&TextStyle::Code))
+            let mut peekable_line = props.line.iter().peekable();
+            while let (Some((character, style, _)), will_code) = (
+                peekable_line.next(),
+                peekable_line
+                    .peek()
+                    .map(|(_, style, _)| style.contains(&TextStyle::Code))
                     .unwrap_or_default(),
             ) {
-                let mut classes: Vec<_> = highlights
+                let mut classes: Vec<_> = style
                     .iter()
+                    .copied()
                     .map(TextStyle::background_classes)
                     .flatten()
                     .copied()
                     .collect();
-                if !will_code {
-                    classes.push("rounded-r")
+                if style.contains(&TextStyle::Code) {
+                    if !will_code {
+                        classes.push("rounded-r")
+                    }
+                    if !was_code {
+                        classes.push("rounded-l")
+                    }
+                    was_code = true
+                } else {
+                    was_code = false
                 }
-                if !was_code {
-                    classes.push("rounded-l")
-                }
-                was_code = highlights.contains(&TextStyle::Code);
 
                 spans.push(html! {
-                    <span class=classes!(classes)>{grapheme}</span>
+                    <span class={classes!(classes)}>{character}</span>
                 });
             }
         } else {
-            for (highlights, grapheme) in idk {
-                let mut classes: Vec<_> = highlights
+            for (i, (character, style, _)) in props.line.iter().enumerate() {
+                let classes: Vec<_> = style
                     .iter()
+                    .copied()
+                    .chain(props.cursor.iter().find_map(|&x| {
+                        if x.0 == i {
+                            Some(TextStyle::Cursor(x.1))
+                        } else {
+                            None
+                        }
+                    }))
                     .map(TextStyle::forground_classes)
                     .flatten()
                     .copied()
                     .collect();
-
                 spans.push(html! {
-                    <span class=classes!(classes)>{grapheme}</span>
+                    <span class={classes!(classes)}>{character}</span>
                 });
             }
         }
-
-        // while let (Some((hi, range)), peek) = (his.next(), his.peek()) {
-        //     if range.start > shown_idx {
-        //         spans.push(html!(<span>{&self.0.line[shown_idx..range.start]}</span>));
-        //     }
-        //     let end = if let Some((_, peek_range)) = peek {
-        //         peek_range.start.min(range.end)
-        //     } else {
-        //         range.end
-        //     };
-        //     spans.push(html! {
-        //             <span class=classes!(hi.iter().map(TextStyle::as_class).flatten().copied().collect::<Vec<&str>>())>
-        //                 {&self.0.line[range.start..end]}
-        //             </span>
-        //         });
-        //     shown_idx = end;
+        if props
+            .cursor
+            .map(|c| c.0 == props.line.len())
+            .unwrap_or_default()
+            && !props.background
+        {
+            spans.push(html! {
+                <span class={classes!(TextStyle::Cursor(props.cursor.unwrap().1).forground_classes())}>{" "}</span>
+            });
+        }
 
         html! {
             <p>
@@ -449,121 +578,26 @@ struct CursorProps {
     text: Vec<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 enum CursorStyle {
+    #[default]
     Box,
     EmtyBox,
+    Insert,
 }
 
-struct Cursor {
-    props: CursorProps,
-    link: ComponentLink<Self>,
-}
-
-impl Component for Cursor {
-    type Message = ();
-    type Properties = CursorProps;
-
-    fn create(props: Self::Properties, link: ComponentLink<Self>) -> Self {
-        Self { props, link }
-    }
-
-    fn update(&mut self, _msg: Self::Message) -> ShouldRender {
-        true
-    }
-
-    fn change(&mut self, props: Self::Properties) -> ShouldRender {
-        let changed = props != self.props;
-        self.props = props;
-        changed
-    }
-
-    fn rendered(&mut self, first_render: bool) {
-        if first_render {
-            let cb = self.link.callback(|_| {});
-            cb.emit(());
-        }
-    }
-
-    fn view(&self) -> Html {
-        // Do something after the one second timeout is up!
-        let line = self.props.lines[self.props.y].cast::<Element>().unwrap();
-        let text_nodes = line.child_nodes();
-        if text_nodes.get(0).is_some() {
-            let range: web_sys::Range = document().create_range().unwrap();
-            let text = &self.props.text[self.props.y];
-            // let body = body.child_nodes().item(0).unwrap();
-            let mut rect = None;
-
-            let mut graphemes = UnicodeSegmentation::graphemes(text.as_str(), true)
-                .chain(iter::once(" "))
-                .take(self.props.x + 1)
-                .peekable();
-
-            let mut text_node_idx = 0;
-            let mut inner_idx = 0;
-
-            log!(self.props.x);
-            while let Some(&grapheme) = graphemes.peek() {
-                log!(grapheme, grapheme.len());
-                let text_node: Node = text_nodes.get(text_node_idx).unwrap();
-                let text_node = text_node.child_nodes().item(0).unwrap();
-
-                let grapheme_width = grapheme.width();
-                let grapheme_width = if grapheme_width == 3 {
-                    6
-                } else {
-                    grapheme_width
-                };
-
-                if range.set_start(&text_node, inner_idx as u32).is_ok()
-                    && range
-                        .set_end(&text_node, (inner_idx + grapheme_width) as u32)
-                        .is_ok()
-                {
-                    rect = Some(range.get_bounding_client_rect());
-                    inner_idx += grapheme_width;
-                    graphemes.next();
-                } else {
-                    text_node_idx += 1;
-                    inner_idx = 0;
-                }
-            }
-
-            // for i in 0..text_nodes.length() {
-            //     let text_node: Node = text_nodes.get(i).unwrap();
-            //     let text_node = text_node.child_nodes().item(0).unwrap();
-            //     loop {
-            //         if range.set_start(&text_node, x as u32).is_ok()
-            //             && range.set_end(&text_node, x as u32 + 1).is_ok()
-            //         {
-            //             rect = Some(range.get_bounding_client_rect());
-            //             content = Some(range.clone_contents().unwrap().text_content().unwrap());
-            //             break;
-            //         }
-            //     }
-            //     x -= UnicodeSegmentation::graphemes(text_node.text_content().unwrap().as_str(), true)
-            //         .count();
-            // }
-            let rect = rect.unwrap();
-            // let content = content.unwrap();
-            let classes = match self.props.style {
-                CursorStyle::Box => vec!["bg-red-300", "text-gray-900", "rounded"],
-                CursorStyle::EmtyBox => vec![
-                    "border-red-300",
-                    "text-transparent",
-                    "bg-transparent",
-                    "border-2",
-                    "rounded",
-                ],
-            };
-            html! {
-                <div class=classes!(classes) style = {format!("position: absolute; width:{}px; height:{}px;left:{}px;top:{}px; padding-", rect.width(), rect.height(), rect.x(), rect.y())}>
-                    // <span class = classes!(class) style="line-height: 1.25; display: block;">{content}</span>
-                </div>
-            }
-        } else {
-            html! {}
+impl CursorStyle {
+    fn classes(&self) -> &'static [&'static str] {
+        match self {
+            CursorStyle::Box => &["bg-red-300", "text-gray-900", "rounded"],
+            CursorStyle::EmtyBox => &[
+                "border-red-300",
+                "text-transparent",
+                "bg-transparent",
+                "border-2",
+                "rounded",
+            ],
+            CursorStyle::Insert => &["cursor-line"],
         }
     }
 }
