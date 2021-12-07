@@ -1,23 +1,33 @@
 #![feature(derive_default_enum)]
 use std::{
+    cell::Cell,
     collections::HashSet,
-    fmt::format,
-    iter::{self, FromIterator},
+    iter::FromIterator,
     ops::{Deref, DerefMut},
 };
 
-use gloo_console::log;
+use gloo_console::{console, log};
 use pulldown_cmark::{Parser, Tag};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
-use web_sys::{window, Element, HtmlInputElement, Node};
+use web_sys::{window, DomRect, Element, HtmlInputElement};
 use yew::prelude::*;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Mode {
     Insert,
     Normal,
+    Command,
+}
+
+#[allow(dead_code)]
+impl Mode {
+    fn is_insert(&self) -> bool {
+        matches!(self, Self::Insert)
+    }
+    fn is_command(&self) -> bool {
+        matches!(self, Self::Command)
+    }
 }
 
 enum Msg {
@@ -25,6 +35,7 @@ enum Msg {
     CursorPos(Option<usize>, Option<usize>),
     Write(String),
     Mode(Mode),
+    ExecuteCommand,
 }
 
 struct Keypress {
@@ -54,7 +65,13 @@ struct KeyRef<'a> {
 
 impl PartialEq<&str> for KeyRef<'_> {
     fn eq(&self, other: &&str) -> bool {
-        self.key == *other && !self.alt && !self.ctrl && !self.shift
+        self.key == *other && !self.alt && !self.ctrl
+    }
+}
+
+impl KeyRef<'_> {
+    fn insertable(&self) -> bool {
+        self.key.graphemes(true).count() == 1 && !self.alt && !self.ctrl
     }
 }
 
@@ -97,6 +114,7 @@ impl TextStyle {
     }
 }
 
+#[derive(Default)]
 struct TextLine {
     // content: String,
     key: uuid::Uuid,
@@ -106,6 +124,9 @@ struct TextLine {
 impl TextLine {
     fn len(&self) -> usize {
         self.characters.len()
+    }
+    fn clear(&mut self) {
+        self.characters.clear()
     }
     fn char_len(&self) -> usize {
         self.characters.iter().map(|(s, ..)| s.len()).sum()
@@ -208,10 +229,13 @@ struct Model {
     /// x 0..=lines[y].len(), y in 0..lines.len()
     cursor_position: (usize, usize),
     node_ref: NodeRef,
+    cursor_ref: Cell<NodeRef>,
     // highlighting: Vec<(TextStyle, Range<usize>)>,
     // lines: Vec<(String, usize, NodeRef, Vec<(TextStyle, Range<usize>)>)>,
     lines: Vec<TextLine>,
+    command: TextLine,
     mode: Mode,
+    font: String,
 }
 
 impl Model {
@@ -226,15 +250,8 @@ impl Model {
                     key if key == "ArrowDown" => vec![Msg::CursorMove(0, 1)],
                     key if key == "ArrowUp" => vec![Msg::CursorMove(0, -1)],
                     key if key == "ArrowRight" => vec![Msg::CursorMove(1, 0)],
-                    // blacklist correctly handled keys
-                    key if ["Shift"].contains(&key.key) => return None,
                     key if key == "Backspace" => todo!(),
-                    KeyRef {
-                        key,
-                        ctrl: false,
-                        alt: false,
-                        ..
-                    } if mode == Mode::Insert => vec![Msg::Write(key.to_owned())],
+                    key if key.insertable() => vec![Msg::Write(key.key.to_owned())],
                     a => {
                         log!("Unknown keypress", a.key);
                         return None;
@@ -242,10 +259,24 @@ impl Model {
                 },
                 Mode::Normal => match key.as_ref() {
                     key if key == "i" => vec![Msg::Mode(Mode::Insert)],
+                    key if key == ":" => vec![Msg::Mode(Mode::Command)],
                     key if key == "h" => vec![Msg::CursorMove(-1, 0)],
                     key if key == "j" => vec![Msg::CursorMove(0, 1)],
                     key if key == "k" => vec![Msg::CursorMove(0, -1)],
                     key if key == "l" => vec![Msg::CursorMove(1, 0)],
+                    a => {
+                        log!("Unknown keypress (normal)", a.key == ":");
+                        return None;
+                    }
+                },
+                Mode::Command => match key.as_ref() {
+                    key if key == "Escape" => vec![Msg::Mode(Mode::Normal)],
+                    key if key == "Enter" => vec![Msg::ExecuteCommand, Msg::Mode(Mode::Normal)],
+                    key if key == "ArrowLeft" => vec![Msg::CursorMove(-1, 0)],
+                    key if key == "ArrowDown" => vec![Msg::CursorMove(0, 1)],
+                    key if key == "ArrowUp" => vec![Msg::CursorMove(0, -1)],
+                    key if key == "ArrowRight" => vec![Msg::CursorMove(1, 0)],
+                    key if key.insertable() => vec![Msg::Write(key.key.to_owned())],
                     a => {
                         log!("Unknown keypress", a.key);
                         return None;
@@ -266,37 +297,33 @@ impl Model {
             .into_offset_iter()
             .filter_map(|(elem, range)| {
                 use pulldown_cmark::Event;
-                Some({
-                    let a = (
-                        match elem {
-                            Event::Start(Tag::Emphasis) => {
-                                TextStyle::Italic
-                                // highlights.insert(TextStyle::Italic);
-                                // true
-                            }
-                            Event::Start(Tag::Strong) => {
-                                TextStyle::Bold
-                                // highlights.insert(TextStyle::Bold);
-                                // true
-                            }
+                Some((
+                    match elem {
+                        Event::Start(Tag::Emphasis) => {
+                            TextStyle::Italic
+                            // highlights.insert(TextStyle::Italic);
+                            // true
+                        }
+                        Event::Start(Tag::Strong) => {
+                            TextStyle::Bold
+                            // highlights.insert(TextStyle::Bold);
+                            // true
+                        }
 
-                            // Event::End(Tag::Emphasis) => {
-                            //     highlights.remove(&TextStyle::Italic);
-                            //     false
-                            // }
-                            // Event::End(Tag::Strong) => {
-                            //     highlights.remove(&TextStyle::Bold);
-                            //     false
-                            // }
-                            Event::Code(_) => TextStyle::Code,
-                            // return Some((HashSet::from([TextStyle::Code]), range)),
-                            _ => return None,
-                        },
-                        range,
-                    );
-                    log!(format!("{:?}", a));
-                    a
-                })
+                        // Event::End(Tag::Emphasis) => {
+                        //     highlights.remove(&TextStyle::Italic);
+                        //     false
+                        // }
+                        // Event::End(Tag::Strong) => {
+                        //     highlights.remove(&TextStyle::Bold);
+                        //     false
+                        // }
+                        Event::Code(_) => TextStyle::Code,
+                        // return Some((HashSet::from([TextStyle::Code]), range)),
+                        _ => return None,
+                    },
+                    range,
+                ))
                 // {
                 //     Some((highlights.clone(), range))
                 // } else {
@@ -323,6 +350,17 @@ impl Model {
             offset += line.char_len() + 1;
         }
     }
+
+    fn execute(&mut self, command: String) {
+        for command in command.split_whitespace() {
+            if let Some((name, value)) = command.split_once("=") {
+                match name {
+                    "font" => self.font = value.to_owned(),
+                    _ => todo!(),
+                }
+            }
+        }
+    }
 }
 
 impl Component for Model {
@@ -333,13 +371,16 @@ impl Component for Model {
         let mut s = Self {
             cursor_position: (0, 0),
             node_ref: NodeRef::default(),
+            cursor_ref: Cell::new(NodeRef::default()),
             lines: //"**aa**"
                 "T_a_ **a** his: _is some pretty ừn ự đ ở **Markdown**_ **xD**\nThis: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a"
                 .repeat(10)
                 .lines()
                 .map(|s| s.into())
                 .collect(),
+                command: TextLine::default(),
             mode: Mode::Normal,
+            font: "mononoki".to_string(), 
         };
         s.parse_md();
         s
@@ -366,19 +407,28 @@ impl Component for Model {
                     // TODO This could be more precise
                     ret |= last != self.cursor_position;
                 }
+                Msg::Write(text) if self.mode.is_command() => {
+                    let (cursor_movement, lines) = self
+                        .command
+                        .insert(self.cursor_position.0.min(self.command.len()), &text);
+                    assert!(lines.is_empty());
+                    // Maybe optimized
+                    // for line in new_lines.into_iter().rev() {
+                    //     self.lines.insert(self.cursor_position.1 + 1, line);
+                    // }
+                    self.update(ctx, cursor_movement);
+                    // self.cursor_position.0 += text.graphemes(true).count();
+                    self.parse_md();
+                    ret = true;
+                }
                 Msg::Write(text) => {
                     let line = &mut self.lines[self.cursor_position.1];
                     let (cursor_movement, new_lines) =
                         line.insert(self.cursor_position.0.min(line.len()), &text);
                     // Maybe optimized
-                    let window = window().unwrap();
-                    let performance = window.performance().unwrap();
-                    let time = performance.now();
                     for line in new_lines.into_iter().rev() {
                         self.lines.insert(self.cursor_position.1 + 1, line);
                     }
-                    let time = performance.now() - time;
-                    log!(format!("{:?}", time));
                     self.update(ctx, cursor_movement);
                     // self.cursor_position.0 += text.graphemes(true).count();
                     self.parse_md();
@@ -404,22 +454,37 @@ impl Component for Model {
                         self.cursor_position.1 = y;
                     }
                 }
+                Msg::ExecuteCommand => {
+                    self.execute(self.command.to_string());
+                    self.command.clear();
+                    ret = true
+                }
             }
         }
         ret
     }
 
-    fn changed(&mut self, _props: &yew::Context<Model>) -> bool {
-        // Should only return "true" if new properties are different to
-        // previously received properties.
-        // This component has no properties so we will always return "false".
-        false
-    }
-
-    fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
+    fn rendered(&mut self, _: &Context<Self>, first_render: bool) {
+        // focus the text at page load to be able to accept keyboard input
         if first_render {
             let smth = self.node_ref.cast::<HtmlInputElement>().unwrap();
             smth.focus().unwrap();
+        }
+
+        // scroll to cursor if out of view
+        // TODO add support for cursor_margins
+        // behavior: 'smooth'
+        if let Some(elem) = self.cursor_ref.take().cast::<Element>() {
+            let window = window().unwrap();
+            let bounds = elem.get_bounding_client_rect();
+            if bounds.y() < 0. {
+                let y = window.scroll_y().unwrap() + bounds.y();
+                window.scroll_to_with_x_and_y(0., y);
+            } else if bounds.bottom() > window.inner_height().unwrap().as_f64().unwrap() {
+                let y = window.scroll_y().unwrap() + bounds.bottom()
+                    - window.inner_height().unwrap().as_f64().unwrap();
+                window.scroll_to_with_x_and_y(0., y);
+            }
         }
     }
 
@@ -429,10 +494,23 @@ impl Component for Model {
             .link()
             .batch_callback(move |e| Self::handle_key_press(e, mode));
 
+        let cursor_ref = NodeRef::default();
+        self.cursor_ref.set(cursor_ref.clone());
+
         // let
         html! {
-            <div class={classes!("dark")} style="font-family: Hack, monospace; font-size: 20px; line-height: 30px" >
-                <div ref={self.node_ref.clone()} style="min-height:100vh" class={classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap")} onkeydown={keypress} /*onfocus={self.link.callback(|_| Msg::Update)}*/ tabindex="0">
+            <div class={classes!("dark")} style={format!("font-family: {}, Hack, Noto, monospace; font-size: 20px; line-height: 30px", self.font)}>
+                <div ref={self.node_ref.clone()} style="min-height:100vh" class={classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap")} onkeydown={keypress} tabindex="0">
+                        <div class={classes!("fixed", "flex", "items-center", "justify-center", "h-1/3", "w-screen")}>
+                            <div class={classes!("w-10/12", "object-center", "bg-gray-700", "rounded", "ring-2", "ring-gray-400", "p-2",(self.mode != Mode::Command).then(|| "hidden"))}>
+
+                                <Line line={self.command.characters.clone()} cursor={(self.mode == Mode::Command).then(|| (self.cursor_position.0, CursorStyle::Insert, cursor_ref.clone()))}>
+                                    <span class={classes!("font-bold")}>
+                                        {":"}
+                                    </span>
+                                </Line>
+                            </div>
+                        </div>
                     <div style="height:0" class={classes!("text-transparent")}>
                         {for self.lines.iter().map(|line| html!{
                             <Line key={line.key.to_string()} line={line.characters.clone()} background=true cursor={None}/>
@@ -440,7 +518,7 @@ impl Component for Model {
                     </div>
                     <div>
                         {for self.lines.iter().enumerate().map(|(i, line)| html!{
-                            <Line key={line.key.to_string()} line={line.characters.clone()} cursor = {(i == self.cursor_position.1)
+                            <Line key={line.key.to_string()} line={line.characters.clone()} cursor = {(i == self.cursor_position.1 && self.mode != Mode::Command)
                                 .then(|| (self.cursor_position.0.min(if self.mode == Mode::Insert {
                                     line.len()
                                 } else {
@@ -449,7 +527,7 @@ impl Component for Model {
                                     CursorStyle::Insert
                                 }else{
                                     CursorStyle::Box
-                                }))}
+                                },cursor_ref.clone()))}
                             />
                         })}
                     </div>
@@ -463,9 +541,11 @@ impl Component for Model {
 struct LineProps {
     line: Vec<(String, HashSet<TextStyle>, usize)>,
     #[prop_or_default]
-    cursor: Option<(usize, CursorStyle)>,
+    cursor: Option<(usize, CursorStyle, NodeRef)>,
     #[prop_or_default]
     background: bool,
+    #[prop_or_default]
+    children: Children,
 }
 
 struct Line(LineProps);
@@ -533,7 +613,7 @@ impl Component for Line {
                 let classes: Vec<_> = style
                     .iter()
                     .copied()
-                    .chain(props.cursor.iter().find_map(|&x| {
+                    .chain(props.cursor.iter().find_map(|x| {
                         if x.0 == i {
                             Some(TextStyle::Cursor(x.1))
                         } else {
@@ -545,23 +625,29 @@ impl Component for Line {
                     .copied()
                     .collect();
                 spans.push(html! {
-                    <span class={classes!(classes)}>{character}</span>
+                    if props.cursor.is_some() && props.cursor.as_ref().unwrap().0 == i {
+                        <span ref={props.cursor.iter().cloned().next().unwrap().2} class={classes!(classes)}>{character}</span>
+                    } else {
+                        <span class={classes!(classes)}>{character}</span>
+                    }
                 });
             }
         }
         if props
             .cursor
-            .map(|c| c.0 == props.line.len())
+            .as_ref()
+            .map(|c| c.0 >= props.line.len())
             .unwrap_or_default()
             && !props.background
         {
             spans.push(html! {
-                <span class={classes!(TextStyle::Cursor(props.cursor.unwrap().1).forground_classes())}>{" "}</span>
+                <span ref={props.cursor.iter().cloned().next().unwrap().2} class={classes!(TextStyle::Cursor(props.cursor.as_ref().unwrap().1).forground_classes())}>{" "}</span>
             });
         }
 
         html! {
             <p>
+                {props.children.clone()}
                 {for spans}
                 <span>{" "}</span>
             </p>
@@ -582,6 +668,7 @@ struct CursorProps {
 enum CursorStyle {
     #[default]
     Box,
+    #[allow(dead_code)]
     EmtyBox,
     Insert,
 }

@@ -1,0 +1,27 @@
+@font-face {
+  font-family: 'mononoki';
+  src: url('fonts/mononoki-Regular.ttf');
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'mononoki';
+  src: url('fonts/mononoki-Bold.ttf');
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'mononoki';
+  src: url('fonts/mononoki-Italic.ttf');
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: 'mononoki';
+  src: url('fonts/mononoki-BoldItalic.ttf');
+  font-weight: 700;
+  font-style: italic;
+}
