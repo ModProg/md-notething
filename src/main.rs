@@ -6,11 +6,11 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use gloo_console::{console, log};
+use gloo_console::console_dbg;
 use pulldown_cmark::{Parser, Tag};
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
-use web_sys::{window, DomRect, Element, HtmlInputElement};
+use web_sys::{window, Element, HtmlInputElement};
 use yew::prelude::*;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -253,7 +253,7 @@ impl Model {
                     key if key == "Backspace" => todo!(),
                     key if key.insertable() => vec![Msg::Write(key.key.to_owned())],
                     a => {
-                        log!("Unknown keypress", a.key);
+                        console_dbg!("Unknown keypress (insert)", a.key);
                         return None;
                     }
                 },
@@ -265,7 +265,7 @@ impl Model {
                     key if key == "k" => vec![Msg::CursorMove(0, -1)],
                     key if key == "l" => vec![Msg::CursorMove(1, 0)],
                     a => {
-                        log!("Unknown keypress (normal)", a.key == ":");
+                        console_dbg!("Unknown keypress (normal)", a.key);
                         return None;
                     }
                 },
@@ -278,7 +278,7 @@ impl Model {
                     key if key == "ArrowRight" => vec![Msg::CursorMove(1, 0)],
                     key if key.insertable() => vec![Msg::Write(key.key.to_owned())],
                     a => {
-                        log!("Unknown keypress", a.key);
+                        console_dbg!("Unknown keypress (command)", a.key);
                         return None;
                     }
                 },

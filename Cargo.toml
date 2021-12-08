@@ -12,7 +12,7 @@ incremental = false
 opt-level = "s"
 
 [dependencies]
-gloo-console = "0.2.0"
+gloo-console = "0.2.1"
 gloo-timers = "0.2.1"
 js-sys = "0.3.55"
 pulldown-cmark = "0.8.0"
