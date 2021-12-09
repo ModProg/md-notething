@@ -1,4 +1,4 @@
-#![feature(derive_default_enum)]
+#![feature(derive_default_enum, bool_to_option)]
 use std::{
     cell::Cell,
     collections::HashSet,
@@ -7,7 +7,7 @@ use std::{
 };
 
 use gloo_console::console_dbg;
-use pulldown_cmark::{Parser, Tag};
+use pulldown_cmark::{Options, Parser, Tag};
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 use web_sys::{window, Element, HtmlInputElement};
@@ -56,6 +56,7 @@ impl From<&KeyboardEvent> for Keypress {
     }
 }
 
+#[allow(dead_code)]
 struct KeyRef<'a> {
     key: &'a str,
     alt: bool,
@@ -92,24 +93,75 @@ enum TextStyle {
     Bold,
     Code,
     Cursor(CursorStyle),
+    Table,
+    TableCell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Position {
+    First,
+    Last,
+    Sandwitched,
+    Single,
+}
+
+impl Position {
+    fn is_first(&self) -> bool {
+        matches!(self, Self::First | Self::Single)
+    }
+    fn is_last(&self) -> bool {
+        matches!(self, Self::Last | Self::Single)
+    }
 }
 
 impl TextStyle {
-    fn forground_classes(self) -> &'static [&'static str] {
+    fn forground_classes(self, position: Position) -> Classes {
+        console_dbg!((self, position));
         match self {
-            TextStyle::Italic => &["italic"],
-            TextStyle::Bold => &["font-bold"],
+            TextStyle::Italic => classes!["italic"],
+            TextStyle::Bold => classes!["font-bold"],
             TextStyle::Cursor(cursor_style) => cursor_style.classes(), //&["text-gray-900", "rounded", "bg-red-300"],
-            _ => &[],
+            TextStyle::Table => classes!["hidden", "whitespace-normal"],
+            TextStyle::TableCell => classes![
+                "unhidden",
+                "border-t-2",
+                "border-b-2",
+                position
+                    .is_first()
+                    .then_some(classes!["border-l-2", "-ml-px"]),
+                position
+                    .is_last()
+                    .then_some(classes!["border-r-2", "-mr-px"])
+            ],
+            _ => classes![],
         }
     }
-    fn background_classes(self) -> &'static [&'static str] {
+    fn background_classes(self, position: Position) -> Classes {
         match self {
             // These are mirrored to help with non monospace spacing
-            TextStyle::Italic => &["italic"],
-            TextStyle::Bold => &["font-bold"],
-            TextStyle::Code => &["bg-gray-600"],
-            _ => &[],
+            TextStyle::Italic => classes!["italic"],
+            TextStyle::Bold => classes!["font-bold"],
+            TextStyle::Code => classes![
+                "bg-gray-600",
+                position.is_first().then_some("rounded-l"),
+                position.is_last().then_some("rounded-r")
+            ],
+            TextStyle::Table => classes!["hidden", "whitespace-normal"],
+            TextStyle::TableCell => classes!["unhidden"],
+            _ => classes![],
+        }
+    }
+
+    fn positioned(
+        &self,
+        was_style: &HashSet<TextStyle>,
+        will_style: &HashSet<TextStyle>,
+    ) -> Position {
+        match (was_style.contains(self), will_style.contains(self)) {
+            (true, true) => Position::Sandwitched,
+            (true, false) => Position::Last,
+            (false, true) => Position::First,
+            (false, false) => Position::Single,
         }
     }
 }
@@ -289,7 +341,8 @@ impl Model {
     }
     fn parse_md(&mut self) {
         let text = &self.lines.iter().collect::<String>();
-        let parser = Parser::new(text);
+        let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+        let parser = Parser::new_ext(text, options);
 
         // let mut highlights: HashSet<TextStyle> = HashSet::new();
 
@@ -299,27 +352,13 @@ impl Model {
                 use pulldown_cmark::Event;
                 Some((
                     match elem {
-                        Event::Start(Tag::Emphasis) => {
-                            TextStyle::Italic
-                            // highlights.insert(TextStyle::Italic);
-                            // true
-                        }
-                        Event::Start(Tag::Strong) => {
-                            TextStyle::Bold
-                            // highlights.insert(TextStyle::Bold);
-                            // true
-                        }
-
-                        // Event::End(Tag::Emphasis) => {
-                        //     highlights.remove(&TextStyle::Italic);
-                        //     false
-                        // }
-                        // Event::End(Tag::Strong) => {
-                        //     highlights.remove(&TextStyle::Bold);
-                        //     false
-                        // }
+                        Event::Start(Tag::Emphasis) => TextStyle::Italic,
+                        Event::Start(Tag::Strong) => TextStyle::Bold,
                         Event::Code(_) => TextStyle::Code,
-                        // return Some((HashSet::from([TextStyle::Code]), range)),
+                        Event::Start(Tag::Table(_)) => TextStyle::Table,
+                        Event::Start(Tag::TableHead) => TextStyle::Bold,
+                        Event::Start(Tag::TableCell) => TextStyle::TableCell,
+
                         _ => return None,
                     },
                     range,
@@ -353,7 +392,7 @@ impl Model {
 
     fn execute(&mut self, command: String) {
         for command in command.split_whitespace() {
-            if let Some((name, value)) = command.split_once("=") {
+            if let Some((name, value)) = command.split_once('=') {
                 match name {
                     "font" => self.font = value.to_owned(),
                     _ => todo!(),
@@ -373,7 +412,15 @@ impl Component for Model {
             node_ref: NodeRef::default(),
             cursor_ref: Cell::new(NodeRef::default()),
             lines: //"**aa**"
-                "T_a_ **a** his: _is some pretty ừn ự đ ở **Markdown**_ **xD**\nThis: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈aph\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a"
+                "T_a_ **a** his: _is some pretty ừn ự đ ở **Markdown**_ **xD**\nThis: _is some pretty ừn ự đ ở **Markdown**_ **xD\nnew** line go *brr* `idk what I am doing`\n\n\nnew paragr🌷🎁💩😜👍🏳️‍🌈ap
+
+| Hello | xD |
+| ----- | -- |
+| test  | 1  |
+
+| | hi |
+
+h\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaksdjpaokdjwoaudlsdoahdkjdbjakldb\n\n\n\nadasd asdad asdwuh asdjh aksjd ajdh lkndjadno aodhoa a aodha aodhadawo waaodsjhda kjsdh alsd asdjh alsdk jasd asd skj d akjsdh a"
                 .repeat(10)
                 .lines()
                 .map(|s| s.into())
@@ -500,7 +547,7 @@ impl Component for Model {
         // let
         html! {
             <div class={classes!("dark")} style={format!("font-family: {}, Hack, Noto, monospace; font-size: 20px; line-height: 30px", self.font)}>
-                <div ref={self.node_ref.clone()} style="min-height:100vh" class={classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap")} onkeydown={keypress} tabindex="0">
+                <div ref={self.node_ref.clone()} style="min-height:100vh" class={classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap", "p-2")} onkeydown={keypress} tabindex="0">
                         <div class={classes!("fixed", "flex", "items-center", "justify-center", "h-1/3", "w-screen")}>
                             <div class={classes!("w-10/12", "object-center", "bg-gray-700", "rounded", "ring-2", "ring-gray-400", "p-2",(self.mode != Mode::Command).then(|| "hidden"))}>
 
@@ -559,11 +606,8 @@ impl Component for Line {
     }
 
     fn changed(&mut self, ctx: &Context<Self>) -> bool {
-        // ctx.props() != ctx.
         // TODO
         if ctx.props() != &self.0 {
-            // log!(format!("{:?}", self.0));
-            // log!(format!("{:?}", ctx.props()));
             self.0 = ctx.props().to_owned();
             true
         } else {
@@ -576,41 +620,39 @@ impl Component for Line {
         let props = ctx.props();
 
         if props.background {
-            let mut was_code = false;
+            let mut was_style: HashSet<TextStyle> = HashSet::new();
             let mut peekable_line = props.line.iter().peekable();
-            while let (Some((character, style, _)), will_code) = (
+            while let (Some((character, style, _)), will_style) = (
                 peekable_line.next(),
                 peekable_line
                     .peek()
-                    .map(|(_, style, _)| style.contains(&TextStyle::Code))
+                    .map(|(_, style, _)| style.clone())
                     .unwrap_or_default(),
             ) {
-                let mut classes: Vec<_> = style
+                let classes: Classes = style
                     .iter()
                     .copied()
-                    .map(TextStyle::background_classes)
-                    .flatten()
-                    .copied()
+                    .flat_map(|style| {
+                        style.background_classes(style.positioned(&was_style, &will_style))
+                    })
                     .collect();
-                if style.contains(&TextStyle::Code) {
-                    if !will_code {
-                        classes.push("rounded-r")
-                    }
-                    if !was_code {
-                        classes.push("rounded-l")
-                    }
-                    was_code = true
-                } else {
-                    was_code = false
-                }
+                was_style = style.clone();
 
                 spans.push(html! {
-                    <span class={classes!(classes)}>{character}</span>
+                    <span class={classes}>{character}</span>
                 });
             }
         } else {
-            for (i, (character, style, _)) in props.line.iter().enumerate() {
-                let classes: Vec<_> = style
+            let mut was_style: HashSet<TextStyle> = HashSet::new();
+            let mut peekable_line = props.line.iter().enumerate().peekable();
+            while let (Some((i, (character, style, _))), will_style) = (
+                peekable_line.next(),
+                peekable_line
+                    .peek()
+                    .map(|(_, (_, style, _))| style.clone())
+                    .unwrap_or_default(),
+            ) {
+                let classes: Classes = style
                     .iter()
                     .copied()
                     .chain(props.cursor.iter().find_map(|x| {
@@ -620,13 +662,14 @@ impl Component for Line {
                             None
                         }
                     }))
-                    .map(TextStyle::forground_classes)
-                    .flatten()
-                    .copied()
+                    .flat_map(|style| {
+                        style.forground_classes(style.positioned(&was_style, &will_style))
+                    })
                     .collect();
+                was_style = style.clone();
                 spans.push(html! {
                     if props.cursor.is_some() && props.cursor.as_ref().unwrap().0 == i {
-                        <span ref={props.cursor.iter().cloned().next().unwrap().2} class={classes!(classes)}>{character}</span>
+                        <span ref={props.cursor.iter().cloned().next().unwrap().2} class={classes}>{character}</span>
                     } else {
                         <span class={classes!(classes)}>{character}</span>
                     }
@@ -641,7 +684,7 @@ impl Component for Line {
             && !props.background
         {
             spans.push(html! {
-                <span ref={props.cursor.iter().cloned().next().unwrap().2} class={classes!(TextStyle::Cursor(props.cursor.as_ref().unwrap().1).forground_classes())}>{" "}</span>
+                <span ref={props.cursor.iter().cloned().next().unwrap().2} class={classes!(TextStyle::Cursor(props.cursor.as_ref().unwrap().1).forground_classes(Position::Single))}>{" "}</span>
             });
         }
 
@@ -674,17 +717,17 @@ enum CursorStyle {
 }
 
 impl CursorStyle {
-    fn classes(&self) -> &'static [&'static str] {
+    fn classes(&self) -> Classes {
         match self {
-            CursorStyle::Box => &["bg-red-300", "text-gray-900", "rounded"],
-            CursorStyle::EmtyBox => &[
+            CursorStyle::Box => classes!["bg-red-300", "text-gray-900", "rounded"],
+            CursorStyle::EmtyBox => classes![
                 "border-red-300",
                 "text-transparent",
                 "bg-transparent",
                 "border-2",
                 "rounded",
             ],
-            CursorStyle::Insert => &["cursor-line"],
+            CursorStyle::Insert => classes!["cursor-line"],
         }
     }
 }
