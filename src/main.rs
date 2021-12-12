@@ -1,7 +1,7 @@
-#![feature(derive_default_enum, bool_to_option)]
+#![feature(derive_default_enum, bool_to_option, associated_type_defaults)]
 use std::{
     cell::Cell,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     iter::FromIterator,
     ops::{Deref, DerefMut},
 };
@@ -10,8 +10,12 @@ use gloo_console::console_dbg;
 use pulldown_cmark::{Options, Parser, Tag};
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
-use web_sys::{window, Element, HtmlInputElement};
+use web_sys::{window, HtmlInputElement};
 use yew::prelude::*;
+
+use crate::document::{Document, Element, Paragraph, Table, TableCell};
+
+mod document;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Mode {
@@ -521,7 +525,7 @@ h\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaks
         // scroll to cursor if out of view
         // TODO add support for cursor_margins
         // behavior: 'smooth'
-        if let Some(elem) = self.cursor_ref.take().cast::<Element>() {
+        if let Some(elem) = self.cursor_ref.take().cast::<web_sys::Element>() {
             let window = window().unwrap();
             let bounds = elem.get_bounding_client_rect();
             if bounds.y() < 0. {
@@ -544,7 +548,24 @@ h\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaks
         let cursor_ref = NodeRef::default();
         self.cursor_ref.set(cursor_ref.clone());
 
-        // let
+        let document = Document {
+            elements: vec![Element::Table(Table {
+                cells: HashMap::from_iter(
+                    vec![(
+                        (0, 0),
+                        TableCell {
+                            content: Paragraph {
+                                text: vec!["H".to_owned()],
+                                cursor: Some(0),
+                            },
+                        },
+                    )]
+                    .into_iter(),
+                ),
+                active_cell: (0, 0),
+            })],
+            active_element: 0,
+        };
         html! {
             <div class={classes!("dark")} style={format!("font-family: {}, Hack, Noto, monospace; font-size: 20px; line-height: 30px", self.font)}>
                 <div ref={self.node_ref.clone()} style="min-height:100vh" class={classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap", "p-2")} onkeydown={keypress} tabindex="0">
@@ -558,26 +579,27 @@ h\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaks
                                 </Line>
                             </div>
                         </div>
-                    <div style="height:0" class={classes!("text-transparent")}>
-                        {for self.lines.iter().map(|line| html!{
-                            <Line key={line.key.to_string()} line={line.characters.clone()} background=true cursor={None}/>
-                        })}
-                    </div>
-                    <div>
-                        {for self.lines.iter().enumerate().map(|(i, line)| html!{
-                            <Line key={line.key.to_string()} line={line.characters.clone()} cursor = {(i == self.cursor_position.1 && self.mode != Mode::Command)
-                                .then(|| (self.cursor_position.0.min(if self.mode == Mode::Insert {
-                                    line.len()
-                                } else {
-                                    line.len().max(1) - 1
-                                }),if self.mode == Mode::Insert {
-                                    CursorStyle::Insert
-                                }else{
-                                    CursorStyle::Box
-                                },cursor_ref.clone()))}
-                            />
-                        })}
-                    </div>
+                        {document.render()}
+                    // <div style="height:0" class={classes!("text-transparent")}>
+                    //     {for self.lines.iter().map(|line| html!{
+                    //         <Line key={line.key.to_string()} line={line.characters.clone()} background=true cursor={None}/>
+                    //     })}
+                    // </div>
+                    // <div>
+                    //     {for self.lines.iter().enumerate().map(|(i, line)| html!{
+                    //         <Line key={line.key.to_string()} line={line.characters.clone()} cursor = {(i == self.cursor_position.1 && self.mode != Mode::Command)
+                    //             .then(|| (self.cursor_position.0.min(if self.mode == Mode::Insert {
+                    //                 line.len()
+                    //             } else {
+                    //                 line.len().max(1) - 1
+                    //             }),if self.mode == Mode::Insert {
+                    //                 CursorStyle::Insert
+                    //             }else{
+                    //                 CursorStyle::Box
+                    //             },cursor_ref.clone()))}
+                    //         />
+                    //     })}
+                    // </div>
                 </div>
             </div>
         }
