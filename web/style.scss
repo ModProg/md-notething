@@ -44,3 +44,11 @@ body {
   src: url('fonts/NotoSansMono-VariableFont_wdth,wght.ttf');
 }
 
+.bg-red-300::before {
+    content: "H";
+    color: black;
+    position: absolute;
+    background: red;
+    width: 1rem;
+}
+

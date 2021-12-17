@@ -1,11 +1,12 @@
 #![feature(derive_default_enum, bool_to_option, associated_type_defaults)]
 use std::{
     cell::Cell,
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     iter::FromIterator,
     ops::{Deref, DerefMut},
 };
 
+use document::{Command, Commandee, Markdown};
 use gloo_console::console_dbg;
 use pulldown_cmark::{Options, Parser, Tag};
 use unicode_segmentation::UnicodeSegmentation;
@@ -13,15 +14,19 @@ use uuid::Uuid;
 use web_sys::{window, HtmlInputElement};
 use yew::prelude::*;
 
-use crate::document::{Document, Element, Paragraph, Table, TableCell};
+use crate::document::{Document, Motion, Render};
 
 mod document;
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Mode {
     Insert,
     Normal,
     Command,
+}
+
+pub struct ApplicationState {
+    cursor_style: CursorStyle,
 }
 
 #[allow(dead_code)]
@@ -34,12 +39,14 @@ impl Mode {
     }
 }
 
+#[derive(Debug)]
 enum Msg {
     CursorMove(i32, i32),
     CursorPos(Option<usize>, Option<usize>),
     Write(String),
     Mode(Mode),
     ExecuteCommand,
+    Cmd(Command),
 }
 
 struct Keypress {
@@ -292,6 +299,7 @@ struct Model {
     command: TextLine,
     mode: Mode,
     font: String,
+    document: Document,
 }
 
 impl Model {
@@ -306,8 +314,9 @@ impl Model {
                     key if key == "ArrowDown" => vec![Msg::CursorMove(0, 1)],
                     key if key == "ArrowUp" => vec![Msg::CursorMove(0, -1)],
                     key if key == "ArrowRight" => vec![Msg::CursorMove(1, 0)],
-                    key if key == "Backspace" => todo!(),
-                    key if key.insertable() => vec![Msg::Write(key.key.to_owned())],
+                    key if key == "Backspace" => vec![Msg::Cmd(Command::Delete(Motion::Left))],
+                    // key if key.insertable() => vec![Msg::Write(key.key.to_owned())],
+                    key if key.insertable() => vec![Msg::Cmd(Command::Insert(key.key.into()))],
                     a => {
                         console_dbg!("Unknown keypress (insert)", a.key);
                         return None;
@@ -316,10 +325,10 @@ impl Model {
                 Mode::Normal => match key.as_ref() {
                     key if key == "i" => vec![Msg::Mode(Mode::Insert)],
                     key if key == ":" => vec![Msg::Mode(Mode::Command)],
-                    key if key == "h" => vec![Msg::CursorMove(-1, 0)],
-                    key if key == "j" => vec![Msg::CursorMove(0, 1)],
-                    key if key == "k" => vec![Msg::CursorMove(0, -1)],
-                    key if key == "l" => vec![Msg::CursorMove(1, 0)],
+                    key if key == "h" => vec![Msg::Cmd(Command::Left)],
+                    key if key == "j" => vec![Msg::Cmd(Command::Down)],
+                    key if key == "k" => vec![Msg::Cmd(Command::Up)],
+                    key if key == "l" => vec![Msg::Cmd(Command::Right)],
                     a => {
                         console_dbg!("Unknown keypress (normal)", a.key);
                         return None;
@@ -411,6 +420,17 @@ impl Component for Model {
     type Properties = ();
 
     fn create(_props: &yew::Context<Model>) -> Self {
+        let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+        let mut parser = Parser::new_ext(
+            "
+| Hello | xD hasd asd a mosad rext heer | xD |
+| ----- | -- | -- |
+| test  | 1paragr🌷🎁💩😜👍🏳️‍🌈ap| 1  |
+            ",
+            options,
+        );
+        let mut document = Document::parse_from_md(&mut parser); //.into_offset_iter();
+        document.command(&Command::CursorEnterH(false));
         let mut s = Self {
             cursor_position: (0, 0),
             node_ref: NodeRef::default(),
@@ -432,12 +452,62 @@ h\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaks
                 command: TextLine::default(),
             mode: Mode::Normal,
             font: "mononoki".to_string(), 
+            document
+            // document :Document{
+            //     elements: vec![Element::Table(Table {
+            //         cells: HashMap::from_iter(
+            //             vec![
+            //                 (
+            //                     (0, 0),
+            //                     Paragraph {
+            //                         text: vec!["H".to_owned()],
+            //                         cursor: Some(0),
+            //                     },
+            //                 ),
+            //                 (
+            //                     (1, 0),
+            //                     Paragraph {
+            //                         text: "xd".chars().map(String::from).collect(),
+            //                         cursor: None,
+            //                     },
+            //                 ),
+            //                 (
+            //                     (1, 2),
+            //                     Paragraph {
+            //                         text: "Hi this is really funny".chars().map(String::from).collect(),
+            //                         cursor: None,
+            //                     },
+            //                 ),
+            //                 (
+            //                     (1, 1),
+            //                     Paragraph {
+            //                         text: "Hi this is really funny".chars().map(String::from).collect(),
+            //                         cursor: None,
+            //                     },
+            //                 ),
+            //                 (
+            //                     (2, 0),
+            //                     Paragraph {
+            //                         text: "Last column".to_owned().chars().map(String::from).collect(),
+            //                         cursor: None,
+            //                     },
+            //                 ),
+            //             ]
+            //             .into_iter(),
+            //         ),
+            //         active_cell: Some((0, 0)),
+            //         height: 3,
+            //         width: 3,
+            //     })],
+            //     active_element: 0,
+            // },
         };
         s.parse_md();
         s
     }
 
     fn update(&mut self, ctx: &Context<Self>, msgs: Self::Message) -> bool {
+        dbg!(&msgs);
         let mut ret = false;
         for msg in msgs {
             match msg {
@@ -510,9 +580,12 @@ h\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaks
                     self.command.clear();
                     ret = true
                 }
+                Msg::Cmd(cmd) => {
+                    ret |= self.document.command(&cmd);
+                }
             }
         }
-        ret
+        true
     }
 
     fn rendered(&mut self, _: &Context<Self>, first_render: bool) {
@@ -547,25 +620,14 @@ h\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaks
 
         let cursor_ref = NodeRef::default();
         self.cursor_ref.set(cursor_ref.clone());
-
-        let document = Document {
-            elements: vec![Element::Table(Table {
-                cells: HashMap::from_iter(
-                    vec![(
-                        (0, 0),
-                        TableCell {
-                            content: Paragraph {
-                                text: vec!["H".to_owned()],
-                                cursor: Some(0),
-                            },
-                        },
-                    )]
-                    .into_iter(),
-                ),
-                active_cell: (0, 0),
-            })],
-            active_element: 0,
+        let state = ApplicationState {
+            cursor_style: match self.mode {
+                Mode::Insert => CursorStyle::Insert,
+                Mode::Normal => CursorStyle::Box,
+                Mode::Command => CursorStyle::EmtyBox,
+            },
         };
+
         html! {
             <div class={classes!("dark")} style={format!("font-family: {}, Hack, Noto, monospace; font-size: 20px; line-height: 30px", self.font)}>
                 <div ref={self.node_ref.clone()} style="min-height:100vh" class={classes!("bg-gray-200", "text-gray-800", "dark:bg-gray-900", "dark:text-gray-300", "wrap", "p-2")} onkeydown={keypress} tabindex="0">
@@ -579,7 +641,7 @@ h\nThissiaodajdnkajbdsklajbdkajbdkjlasbdlkjabdwhpdajnlvnoampmönöaiofoaödnlaks
                                 </Line>
                             </div>
                         </div>
-                        {document.render()}
+                        {self.document.render(&state)}
                     // <div style="height:0" class={classes!("text-transparent")}>
                     //     {for self.lines.iter().map(|line| html!{
                     //         <Line key={line.key.to_string()} line={line.characters.clone()} background=true cursor={None}/>
@@ -730,7 +792,7 @@ struct CursorProps {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-enum CursorStyle {
+pub enum CursorStyle {
     #[default]
     Box,
     #[allow(dead_code)]
@@ -741,12 +803,30 @@ enum CursorStyle {
 impl CursorStyle {
     fn classes(&self) -> Classes {
         match self {
-            CursorStyle::Box => classes!["bg-red-300", "text-gray-900", "rounded"],
+            CursorStyle::Box => classes![
+                "after:absolute",
+                "after:bg-red-300",
+                "after:block",
+                "after:inset-0",
+                "after:rounded",
+                "after:z-0",
+                // "inline-block",
+                "relative",
+                // "bg-red-300",
+                "text-gray-900",
+                // "rounded",
+                // // "border-red-300",
+                // // "border",
+                // // "m-[-1px]",
+                // "p-px",
+                // "-m-px"
+            ],
             CursorStyle::EmtyBox => classes![
                 "border-red-300",
                 "text-transparent",
                 "bg-transparent",
                 "border-2",
+                "m-[-2px]",
                 "rounded",
             ],
             CursorStyle::Insert => classes!["cursor-line"],
